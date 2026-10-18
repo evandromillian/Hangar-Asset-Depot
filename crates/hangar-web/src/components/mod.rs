@@ -6,5 +6,6 @@ pub mod materials;
 pub mod members;
 pub mod new_version;
 pub mod stage;
+pub mod tags;
 pub mod versions;
 pub mod viewer_panel;

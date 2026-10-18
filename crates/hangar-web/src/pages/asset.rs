@@ -210,7 +210,7 @@ pub fn AssetPage() -> impl IntoView {
                                         <KindBadge kind=s.kind />
                                         {a.source.vendor.clone().map(|v| view! { <span class="pill">{v}</span> })}
                                         {a.source.license.clone().map(|l| view! { <span class="pill pill-outline">{l}</span> })}
-                                        {s.tags.iter().map(|t| view! { <span class="tag static">"#" {t.clone()}</span> }).collect_view()}
+                                        {s.tags.iter().map(|t| view! { <span class="tag static">{t.clone()}</span> }).collect_view()}
                                     </div>
                                 </div>
                             }

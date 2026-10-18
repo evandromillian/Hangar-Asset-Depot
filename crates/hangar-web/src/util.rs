@@ -126,6 +126,13 @@ pub fn slugify(s: &str) -> String {
     out.trim_end_matches('-').to_string()
 }
 
+/// `KeyboardEvent.key`, read defensively: Chrome dispatches `keydown` events
+/// without a `key` when a <datalist> / autofill suggestion is picked, and
+/// `KeyboardEvent::key()` throws on them.
+pub fn event_key(ev: &web_sys::KeyboardEvent) -> Option<String> {
+    js_sys::Reflect::get(ev, &"key".into()).ok().and_then(|k| k.as_string())
+}
+
 /// Splits "tag1, tag2  tag3" into clean tags.
 pub fn parse_tags(s: &str) -> Vec<String> {
     s.split([',', ' ', ';'])

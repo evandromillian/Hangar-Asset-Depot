@@ -139,7 +139,7 @@ pub fn LibraryPage() -> impl IntoView {
                 <input
                     class="tag-filter"
                     type="text"
-                    placeholder="#tag"
+                    placeholder="filtrar por tag"
                     prop:value=move || tag.get()
                     on:change=move |ev| {
                         tag.set(event_target_value(&ev).trim().trim_start_matches('#').to_lowercase());
@@ -184,7 +184,8 @@ pub fn LibraryPage() -> impl IntoView {
                             </span>
                             <button
                                 class="btn btn-ghost btn-sm"
-                                disabled=move || page.get() + 1 >= pages
+                                // Braces: a bare `>=` ends the tag inside view!.
+                                disabled=move || { page.get() + 1 >= pages }
                                 on:click=move |_| page.update(|p| *p += 1)
                             >
                                 "Próxima →"
@@ -258,15 +259,17 @@ fn AssetCard(asset: AssetSummary, tag: RwSignal<String>, page: RwSignal<u64>) ->
                         .iter()
                         .map(|t| {
                             let t2 = t.clone();
+                            let t3 = t.clone();
                             view! {
                                 <button
                                     class="tag"
+                                    class:active=move || tag.with(|f| *f == t3)
+                                    title="Filtrar por esta tag"
                                     on:click=move |_| {
                                         tag.set(t2.clone());
                                         page.set(0);
                                     }
                                 >
-                                    "#"
                                     {t.clone()}
                                 </button>
                             }

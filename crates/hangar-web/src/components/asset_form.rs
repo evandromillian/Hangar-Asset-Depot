@@ -2,7 +2,8 @@
 
 use crate::api;
 use crate::components::common::{ErrorBanner, Modal};
-use crate::util::{kind_label, parse_tags, slugify};
+use crate::components::tags::TagInput;
+use crate::util::{kind_label, slugify};
 use chrono::NaiveDate;
 use hangar_core::{AssetDetail, AssetKind, AssetSource, CreateAssetRequest, UpdateAssetRequest};
 use leptos::prelude::*;
@@ -16,7 +17,7 @@ struct Fields {
     slug_touched: RwSignal<bool>,
     kind: RwSignal<AssetKind>,
     description: RwSignal<String>,
-    tags: RwSignal<String>,
+    tags: RwSignal<Vec<String>>,
     vendor: RwSignal<String>,
     url: RwSignal<String>,
     author: RwSignal<String>,
@@ -41,7 +42,7 @@ impl Fields {
             slug_touched: RwSignal::new(initial.is_some()),
             kind: RwSignal::new(initial.map(|a| a.summary.kind).unwrap_or(AssetKind::Model)),
             description: RwSignal::new(initial.map(|a| a.description.clone()).unwrap_or_default()),
-            tags: RwSignal::new(initial.map(|a| a.summary.tags.join(", ")).unwrap_or_default()),
+            tags: RwSignal::new(initial.map(|a| a.summary.tags.clone()).unwrap_or_default()),
             vendor: s(src.vendor),
             url: s(src.url),
             author: s(src.author),
@@ -113,10 +114,11 @@ fn FieldsView(f: Fields, creating: bool) -> impl IntoView {
                         .collect_view()}
                 </select>
             </label>
-            <label class="field span-2">
-                <span>"Tags " <small class="muted">"(separadas por vírgula)"</small></span>
-                <input type="text" placeholder="tanque, ww2, deserto" bind:value=f.tags />
-            </label>
+            // Not a <label>: a click on it would be forwarded to the first chip's remove button.
+            <div class="field span-2">
+                <span>"Tags " <small class="muted">"(Enter, vírgula ou espaço para adicionar)"</small></span>
+                <TagInput tags=f.tags placeholder="tanque, ww2, deserto" />
+            </div>
             <label class="field span-2">
                 <span>"Descrição"</span>
                 <textarea rows="2" bind:value=f.description></textarea>
@@ -181,7 +183,7 @@ pub fn NewAssetModal(project_id: Uuid, on_close: Callback<()>, on_created: Callb
             slug: opt(f.slug.get_untracked()),
             kind: f.kind.get_untracked(),
             description: f.description.get_untracked(),
-            tags: parse_tags(&f.tags.get_untracked()),
+            tags: f.tags.get_untracked(),
             source: f.source(),
         };
         spawn_local(async move {
@@ -226,7 +228,7 @@ pub fn EditAssetModal(asset: AssetDetail, on_close: Callback<()>, on_saved: Call
             name: Some(f.name.get_untracked().trim().to_string()),
             description: Some(f.description.get_untracked()),
             kind: Some(f.kind.get_untracked()),
-            tags: Some(parse_tags(&f.tags.get_untracked())),
+            tags: Some(f.tags.get_untracked()),
             source: Some(f.source()),
             head_version_id: None,
         };

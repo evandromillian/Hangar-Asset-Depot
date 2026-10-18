@@ -1,17 +1,14 @@
 //! Small shared UI pieces.
 
-use crate::util::{kind_glyph, kind_label, status_label};
+use crate::util::{event_key, kind_glyph, kind_label, status_label};
 use hangar_core::{AssetKind, Role, VersionStatus};
 use leptos::prelude::*;
 
 #[component]
 pub fn Modal(#[prop(into)] title: String, on_close: Callback<()>, children: Children, #[prop(optional)] wide: bool) -> impl IntoView {
-    // Esc closes the dialog. `key` is read through Reflect: Chrome dispatches a `keydown` without a
-    // `key` property when a <datalist> / autofill suggestion is picked, and `KeyboardEvent::key()`
-    // throws on it.
+    // Esc closes the dialog.
     let handle = window_event_listener(leptos::ev::keydown, move |ev| {
-        let key = js_sys::Reflect::get(&ev, &"key".into()).ok().and_then(|k| k.as_string());
-        if key.as_deref() == Some("Escape") {
+        if event_key(&ev).as_deref() == Some("Escape") {
             on_close.run(());
         }
     });
