@@ -9,8 +9,8 @@ use crate::config::HangarConfig;
 use crate::entities::{asset_versions, version_files};
 use crate::storage::BlobStore;
 use anyhow::Context;
-use hangar_core::{FileEntry, VersionStatus};
-use hangar_pipeline::{ArtifactRole, PipelineConfig, ProcessInput};
+use hangar_core::{ANIMATION_CONFIG_PATH, AnimationConfig, FileEntry, SkeletonPreview, VersionStatus};
+use hangar_pipeline::{ArtifactRole, PipelineConfig, ProcessInput, SkeletonSource};
 use sea_orm::{
     ColumnTrait, ConnectionTrait, DatabaseConnection, DbBackend, EntityTrait, FromQueryResult, QueryFilter, Statement,
 };
@@ -247,21 +247,63 @@ pub async fn process_version(ctx: &WorkerCtx, version_id: Uuid) -> anyhow::Resul
     let work = tempfile::Builder::new().prefix("v-").tempdir_in(&tmp_root)?;
 
     let relevant: Vec<FileEntry> = files.iter().filter(|f| hangar_pipeline::is_relevant(&f.path)).cloned().collect();
-    for f in &relevant {
-        // Paths were normalised on commit, so joining cannot escape `work`.
-        ctx.store
-            .download_to(&f.hash, &work.path().join(&f.path))
-            .await
-            .map_err(|e| anyhow::anyhow!("download {}: {e}", f.path))?;
+    download_all(ctx, &relevant, work.path()).await?;
+
+    // Reference skeletons the version's animations are bound to. Each one keeps
+    // its temp dir alive (`_dirs`) until the pipeline is done.
+    let mut skeletons = Vec::new();
+    let mut unresolved: Vec<SkeletonPreview> = Vec::new();
+    let mut _dirs = Vec::new();
+    let mut order: Vec<String> = Vec::new();
+    if relevant.iter().any(|f| f.path == ANIMATION_CONFIG_PATH) {
+        let bytes = tokio::fs::read(work.path().join(ANIMATION_CONFIG_PATH)).await?;
+        let config = AnimationConfig::from_json(&bytes).unwrap_or_else(|e| {
+            unresolved.push(SkeletonPreview { error: Some(format!("{ANIMATION_CONFIG_PATH} ignored: {e}")), ..Default::default() });
+            AnimationConfig::default()
+        });
+        order = config.skeletons.clone();
+        for slug in &config.skeletons {
+            match load_skeleton(ctx, slug, &tmp_root).await {
+                Ok(Some((source, preview, dir))) => {
+                    skeletons.push((source, preview));
+                    _dirs.push(dir);
+                }
+                Ok(None) => unresolved.push(SkeletonPreview {
+                    skeleton: slug.clone(),
+                    name: slug.clone(),
+                    error: Some("reference skeleton not registered, or its asset has no version".into()),
+                    ..Default::default()
+                }),
+                Err(e) => return Err(e.context(format!("reference skeleton {slug}"))),
+            }
+        }
     }
+    let (sources, built_from): (Vec<SkeletonSource>, Vec<SkeletonPreview>) = skeletons.into_iter().unzip();
 
     let root = work.path().to_path_buf();
     let cfg = ctx.pipeline.clone();
-    let output = tokio::task::spawn_blocking(move || {
-        let input = ProcessInput { root: &root, files: &relevant };
+    let mut output = tokio::task::spawn_blocking(move || {
+        let input = ProcessInput { root: &root, files: &relevant, skeletons: &sources };
         hangar_pipeline::process(&input, &cfg)
     })
     .await??;
+    let m = &mut output.manifest;
+    for entry in &mut m.skeletons {
+        if let Some(b) = built_from.iter().find(|b| b.skeleton == entry.skeleton) {
+            (entry.version_id, entry.version_number) = (b.version_id, b.version_number);
+        }
+    }
+    if m.kind == Some(hangar_core::PreviewKind::Animation) {
+        for u in unresolved {
+            if let Some(e) = &u.error {
+                m.warnings.push(if u.skeleton.is_empty() { e.clone() } else { format!("skeleton {}: {e}", u.skeleton) });
+            }
+            if !u.skeleton.is_empty() {
+                m.skeletons.push(u);
+            }
+        }
+        m.skeletons.sort_by_key(|e| order.iter().position(|s| *s == e.skeleton));
+    }
 
     // Store artifacts (deduplicated by hash) and record renditions.
     ctx.db
@@ -276,6 +318,7 @@ pub async fn process_version(ctx: &WorkerCtx, version_id: Uuid) -> anyhow::Resul
             ArtifactRole::LodGlb(level) => ("lod_glb", level.to_string()),
             ArtifactRole::Thumbnail => ("thumbnail", String::new()),
             ArtifactRole::TexturePreview(path) => ("texture_preview", path.clone()),
+            ArtifactRole::SkeletonGlb(slug) => ("skeleton_glb", slug.clone()),
         };
         let expected = artifact.hash.clone();
         let hash = ctx
@@ -311,4 +354,60 @@ pub async fn process_version(ctx: &WorkerCtx, version_id: Uuid) -> anyhow::Resul
         "version processed"
     );
     Ok(())
+}
+
+async fn download_all(ctx: &WorkerCtx, files: &[FileEntry], root: &std::path::Path) -> anyhow::Result<()> {
+    for f in files {
+        // Paths were normalised on commit, so joining cannot escape `root`.
+        ctx.store
+            .download_to(&f.hash, &root.join(&f.path))
+            .await
+            .map_err(|e| anyhow::anyhow!("download {}: {e}", f.path))?;
+    }
+    Ok(())
+}
+
+#[derive(Debug, FromQueryResult)]
+struct SkeletonHead {
+    name: String,
+    version_id: Uuid,
+    number: i32,
+}
+
+/// Materialises the head version of the skeleton `slug` in a temp dir: the
+/// pipeline input, the version it came from, and the dir guard. `None` when
+/// the slug is unknown or its asset has no version yet.
+async fn load_skeleton(
+    ctx: &WorkerCtx,
+    slug: &str,
+    tmp_root: &std::path::Path,
+) -> anyhow::Result<Option<(SkeletonSource, SkeletonPreview, tempfile::TempDir)>> {
+    let head = SkeletonHead::find_by_statement(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        "SELECT s.name, v.id AS version_id, v.number
+         FROM skeletons s JOIN assets a ON a.id = s.asset_id JOIN asset_versions v ON v.id = a.head_version_id
+         WHERE s.slug = $1",
+        [slug.into()],
+    ))
+    .one(&ctx.db)
+    .await?;
+    let Some(head) = head else { return Ok(None) };
+    let files: Vec<FileEntry> = version_files::Entity::find()
+        .filter(version_files::Column::VersionId.eq(head.version_id))
+        .all(&ctx.db)
+        .await?
+        .iter()
+        .map(|f| f.to_entry())
+        .filter(|f| hangar_pipeline::is_relevant(&f.path))
+        .collect();
+    let dir = tempfile::Builder::new().prefix("skel-").tempdir_in(tmp_root)?;
+    download_all(ctx, &files, dir.path()).await?;
+    let source = SkeletonSource { slug: slug.to_string(), name: head.name.clone(), root: dir.path().to_path_buf(), files };
+    let built_from = SkeletonPreview {
+        skeleton: slug.to_string(),
+        version_id: Some(head.version_id),
+        version_number: Some(head.number),
+        ..Default::default()
+    };
+    Ok(Some((source, built_from, dir)))
 }

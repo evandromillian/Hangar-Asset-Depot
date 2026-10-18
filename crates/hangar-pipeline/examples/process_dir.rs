@@ -1,25 +1,38 @@
 //! Run the pipeline on a folder and dump the results.
 //!
 //! ```text
-//! cargo run -p hangar-pipeline --example process_dir -- <asset-dir> <out-dir>
+//! cargo run -p hangar-pipeline --example process_dir -- <asset-dir> <out-dir> [<skeleton-dir>...]
 //! ```
-//! Set `HANGAR_BLENDER=/path/to/blender` to enable the Blender fallback.
+//! Extra directories are reference skeletons (slug = directory name) for an
+//! animation-only asset. Set `HANGAR_BLENDER=/path/to/blender` to enable the
+//! Blender fallback.
 
 use hangar_core::FileEntry;
-use hangar_pipeline::{process, ArtifactRole, PipelineConfig, ProcessInput};
-use std::path::PathBuf;
+use hangar_pipeline::{process, ArtifactRole, PipelineConfig, ProcessInput, SkeletonSource};
+use std::path::{Path, PathBuf};
+
+fn scan(dir: &Path) -> anyhow::Result<Vec<FileEntry>> {
+    let mut files = Vec::new();
+    for e in walkdir::WalkDir::new(dir).into_iter().filter_map(|e| e.ok()).filter(|e| e.file_type().is_file()) {
+        let rel = e.path().strip_prefix(dir)?.to_string_lossy().replace('\\', "/");
+        let bytes = std::fs::read(e.path())?;
+        files.push(FileEntry { path: rel, hash: blake3::hash(&bytes).to_hex().to_string(), size: bytes.len() as i64 });
+    }
+    Ok(files)
+}
 
 fn main() -> anyhow::Result<()> {
     let mut args = std::env::args().skip(1);
-    let dir = PathBuf::from(args.next().expect("usage: process_dir <dir> <out>"));
-    let out = PathBuf::from(args.next().expect("usage: process_dir <dir> <out>"));
+    let dir = PathBuf::from(args.next().expect("usage: process_dir <dir> <out> [<skeleton-dir>...]"));
+    let out = PathBuf::from(args.next().expect("usage: process_dir <dir> <out> [<skeleton-dir>...]"));
     std::fs::create_dir_all(&out)?;
 
-    let mut files = Vec::new();
-    for e in walkdir::WalkDir::new(&dir).into_iter().filter_map(|e| e.ok()).filter(|e| e.file_type().is_file()) {
-        let rel = e.path().strip_prefix(&dir)?.to_string_lossy().replace('\\', "/");
-        let bytes = std::fs::read(e.path())?;
-        files.push(FileEntry { path: rel, hash: blake3::hash(&bytes).to_hex().to_string(), size: bytes.len() as i64 });
+    let files = scan(&dir)?;
+    let mut skeletons = Vec::new();
+    for s in args {
+        let root = PathBuf::from(s);
+        let slug = root.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        skeletons.push(SkeletonSource { name: slug.clone(), slug, files: scan(&root)?, root });
     }
 
     let mut cfg = PipelineConfig::default();
@@ -28,7 +41,7 @@ fn main() -> anyhow::Result<()> {
         cfg.blender_script = Some(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tools/blender/export_glb.py"));
     }
     let t = std::time::Instant::now();
-    let res = process(&ProcessInput { root: &dir, files: &files }, &cfg)?;
+    let res = process(&ProcessInput { root: &dir, files: &files, skeletons: &skeletons }, &cfg)?;
     eprintln!("processed {} files in {:.2?}", files.len(), t.elapsed());
 
     std::fs::write(out.join("manifest.json"), serde_json::to_vec_pretty(&res.manifest)?)?;
@@ -43,6 +56,7 @@ fn main() -> anyhow::Result<()> {
             ArtifactRole::LodGlb(l) => format!("lod{l}.{ext}"),
             ArtifactRole::Thumbnail => format!("thumbnail.{ext}"),
             ArtifactRole::TexturePreview(p) => format!("tex_{}.{ext}", p.replace(['/', '\\', ' '], "_")),
+            ArtifactRole::SkeletonGlb(slug) => format!("skeleton_{slug}.{ext}"),
         };
         std::fs::write(out.join(name), &a.bytes)?;
     }
@@ -60,6 +74,18 @@ fn main() -> anyhow::Result<()> {
     }
     if let Some(s) = &m.stats {
         println!("  stats: {} meshes, {} materials, dims {:?}, uvs={} normals={} skin={} anims={}", s.meshes, s.materials, s.dimensions(), s.has_uvs, s.has_normals, s.has_skin, s.animations);
+    }
+    for s in &m.skeletons {
+        let clips: Vec<&str> = s.animations.iter().map(|a| a.name.as_str()).collect();
+        println!(
+            "  skeleton {}: {}/{} bones matched, clips {:?}, glb {} KiB{}",
+            s.skeleton,
+            s.bones_matched,
+            s.bones_total,
+            clips,
+            s.glb_size / 1024,
+            s.error.as_ref().map(|e| format!(", error: {e}")).unwrap_or_default()
+        );
     }
     for w in &m.warnings {
         println!("  warning: {w}");

@@ -321,6 +321,52 @@ pub struct DiffQuery {
     pub against: Option<Uuid>,
 }
 
+// ------------------------------------------------------- reference skeletons
+
+/// A system-wide reference skeleton: animation-only versions bound to it (see
+/// [`AnimationConfig`](crate::AnimationConfig)) are previewed on the mesh of
+/// `asset_id`'s head version.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SkeletonDto {
+    pub id: Uuid,
+    /// Immutable: it is what `.hangar/animation.json` refers to.
+    pub slug: String,
+    pub name: String,
+    pub description: String,
+    pub asset_id: Uuid,
+    pub asset_name: String,
+    pub head: Option<VersionBrief>,
+    pub thumbnail_url: Option<String>,
+    /// Whether the head version's mesh is skinned (None: not processed yet).
+    pub has_skin: Option<bool>,
+    /// Head versions of animation assets previewed on this skeleton...
+    pub animation_count: i64,
+    /// ...and how many of them were built from an older skeleton version.
+    pub stale_count: i64,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateSkeletonRequest {
+    pub name: String,
+    pub slug: Option<String>,
+    #[serde(default)]
+    pub description: String,
+    pub asset_id: Uuid,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct UpdateSkeletonRequest {
+    pub name: Option<String>,
+    pub description: Option<String>,
+    pub asset_id: Option<Uuid>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReprocessQueued {
+    pub queued: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JobDto {
     pub id: i64,

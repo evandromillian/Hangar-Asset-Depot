@@ -250,6 +250,44 @@ pub async fn material_config(vid: Uuid) -> ApiResult<Option<MaterialConfig>> {
     }
 }
 
+/// The animation binding (reference skeletons) of a version; `None` when it has none.
+pub async fn animation_config(vid: Uuid) -> ApiResult<Option<AnimationConfig>> {
+    match get_bytes(&raw_file_url(vid, ANIMATION_CONFIG_PATH, false)).await {
+        Ok(bytes) => AnimationConfig::from_json(&bytes)
+            .map(Some)
+            .map_err(|e| ApiError { status: 422, message: format!("{ANIMATION_CONFIG_PATH} inválido: {e}") }),
+        Err(e) if e.status == 404 => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+// ----------------------------------------------------------- reference skeletons
+
+pub async fn skeletons() -> ApiResult<Vec<SkeletonDto>> {
+    get_json("/api/skeletons").await
+}
+
+pub async fn create_skeleton(req: CreateSkeletonRequest) -> ApiResult<SkeletonDto> {
+    let url = "/api/skeletons";
+    body_json(Request::post(url), url, &req).await
+}
+
+pub async fn update_skeleton(id: Uuid, req: UpdateSkeletonRequest) -> ApiResult<SkeletonDto> {
+    let url = format!("/api/skeletons/{id}");
+    body_json(Request::patch(&url), &url, &req).await
+}
+
+pub async fn delete_skeleton(id: Uuid) -> ApiResult<()> {
+    let url = format!("/api/skeletons/{id}");
+    no_content(Request::delete(&url), &url).await
+}
+
+pub async fn reprocess_skeleton(id: Uuid) -> ApiResult<ReprocessQueued> {
+    let url = format!("/api/skeletons/{id}/reprocess");
+    let resp = send(Request::post(&url), &url).await?;
+    resp.json().await.map_err(net_err)
+}
+
 // ------------------------------------------------------------------------ blobs
 
 pub async fn missing_blobs(hashes: Vec<String>) -> ApiResult<Vec<String>> {

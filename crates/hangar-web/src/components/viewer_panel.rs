@@ -3,7 +3,8 @@
 use crate::api;
 use crate::util::{fmt_bytes, fmt_compact, fmt_int};
 use crate::viewer::{self, CANVAS_ID, ClipInfo, VariantTexture, ViewerCommand, ViewerDraft, ViewerEvent};
-use hangar_core::{LodSource, VersionDto};
+use crate::components::animation::by_folder;
+use hangar_core::{AnimationInfo, LodSource, PreviewKind, VersionDto};
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use leptos_bevy_canvas::prelude::*;
@@ -88,7 +89,29 @@ pub fn ViewerPanel(
     let anim_speed = RwSignal::new(1.0f32);
     let anim_time = RwSignal::new(0.0f32);
 
-    let preview = Memo::new(move |_| version.get().and_then(|v| v.preview));
+    // Animation-only versions: the reference skeletons they were built on; the
+    // selected one is shown as if it were the model.
+    let raw = Memo::new(move |_| version.get().and_then(|v| v.preview));
+    let rigs = Memo::new(move |_| {
+        raw.get()
+            .filter(|p| p.kind == Some(PreviewKind::Animation))
+            .map(|p| p.skeletons.into_iter().filter(|s| s.glb_hash.is_some()).collect::<Vec<_>>())
+            .unwrap_or_default()
+    });
+    let skeleton = RwSignal::new(None::<String>);
+    Effect::new(move |_| {
+        let list = rigs.get();
+        if !skeleton.get_untracked().is_some_and(|s| list.iter().any(|r| r.skeleton == s)) {
+            skeleton.set(list.first().map(|r| r.skeleton.clone()));
+        }
+    });
+    let preview = Memo::new(move |_| {
+        let p = raw.get()?;
+        if p.kind != Some(PreviewKind::Animation) {
+            return Some(p);
+        }
+        p.on_skeleton(&skeleton.get()?)
+    });
 
     // Keep the LOD level / variant name when switching versions if still valid.
     Effect::new(move |_| {
@@ -279,22 +302,31 @@ pub fn ViewerPanel(
                         >
                             <option value="" selected=move || anim_sel.get().is_none()>"Pose de repouso"</option>
                             {move || {
-                                clips
-                                    .get()
-                                    .into_iter()
-                                    .enumerate()
-                                    .map(|(i, a)| {
-                                        view! {
-                                            <option
-                                                value=i.to_string()
-                                                title=a.source.clone().unwrap_or_default()
-                                                selected=move || anim_sel.get() == Some(i)
-                                            >
-                                                {format!("{} ({:.1} s)", a.name, a.duration_secs)}
-                                            </option>
-                                        }
-                                    })
-                                    .collect_view()
+                                let option = move |(i, a): (usize, AnimationInfo)| {
+                                    view! {
+                                        <option
+                                            value=i.to_string()
+                                            title=a.source.clone().unwrap_or_default()
+                                            selected=move || anim_sel.get() == Some(i)
+                                        >
+                                            {format!("{} ({:.1} s)", a.name, a.duration_secs)}
+                                        </option>
+                                    }
+                                };
+                                // Packages spread over folders: one group per folder.
+                                let groups = by_folder(&clips.get());
+                                if groups.len() > 1 {
+                                    groups
+                                        .into_iter()
+                                        .map(|(folder, list)| {
+                                            let label = if folder.is_empty() { "/".to_string() } else { folder };
+                                            view! { <optgroup label=label>{list.into_iter().map(option).collect_view()}</optgroup> }
+                                        })
+                                        .collect_view()
+                                        .into_any()
+                                } else {
+                                    groups.into_iter().flat_map(|(_, list)| list).map(option).collect_view().into_any()
+                                }
                             }}
                         </select>
                         <button class="toggle anim-btn" title="Próxima animação" on:click=move |_| cycle(1)>"›"</button>
@@ -359,7 +391,42 @@ pub fn ViewerPanel(
                 </div>
             </Show>
             <div class="viewer-toolbar">
-                <div class="tool-group">
+                <Show when=move || rigs.with(|r| !r.is_empty())>
+                    <div class="tool-group">
+                        <span class="tool-label">"Esqueleto"</span>
+                        {move || {
+                            rigs.get()
+                                .into_iter()
+                                .map(|r| {
+                                    let slug = r.skeleton.clone();
+                                    let active = r.skeleton.clone();
+                                    let tris = r.stats.as_ref().map_or(0, |s| s.triangles);
+                                    view! {
+                                        <button
+                                            class="seg"
+                                            class:active=move || skeleton.get().as_deref() == Some(active.as_str())
+                                            title=format!(
+                                                "{} de {} ossos encontrados · {} clipes · {}",
+                                                r.bones_matched,
+                                                r.bones_total,
+                                                r.animations.len(),
+                                                fmt_bytes(r.glb_size as i64),
+                                            )
+                                            on:click=move |_| skeleton.set(Some(slug.clone()))
+                                        >
+                                            <span class="seg-main">{r.name.clone()}</span>
+                                            <span class="seg-sub">
+                                                {r.version_number.map(|n| format!("v{n} · ")).unwrap_or_default()}
+                                                {fmt_compact(tris)} "▲"
+                                            </span>
+                                        </button>
+                                    }
+                                })
+                                .collect_view()
+                        }}
+                    </div>
+                </Show>
+                <div class="tool-group" class:hidden=move || rigs.with(|r| !r.is_empty())>
                     <span class="tool-label">"LOD"</span>
                     {move || {
                         preview

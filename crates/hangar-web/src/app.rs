@@ -1,7 +1,9 @@
 //! Root component: session handling, routes and the top bar.
 
 use crate::api;
-use crate::pages::{asset::AssetPage, library::LibraryPage, login::LoginPage, projects::ProjectsPage};
+use crate::pages::{
+    asset::AssetPage, library::LibraryPage, login::LoginPage, projects::ProjectsPage, skeletons::SkeletonsPage,
+};
 use hangar_core::UserDto;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
@@ -42,6 +44,7 @@ pub fn App() -> impl IntoView {
                     <Route path=path!("/") view=|| view! { <RequireAuth><ProjectsPage /></RequireAuth> } />
                     <Route path=path!("/p/:pid") view=|| view! { <RequireAuth><LibraryPage /></RequireAuth> } />
                     <Route path=path!("/a/:aid") view=|| view! { <RequireAuth><AssetPage /></RequireAuth> } />
+                    <Route path=path!("/admin/skeletons") view=|| view! { <RequireAuth><SkeletonsPage /></RequireAuth> } />
                 </Routes>
             </main>
         </Router>
@@ -100,6 +103,7 @@ fn TopBar() -> impl IntoView {
                             .collect::<String>()
                             .to_uppercase();
                         view! {
+                            {u.is_admin.then(|| view! { <A href="/admin/skeletons" attr:class="topbar-link">"Esqueletos"</A> })}
                             <div class="userbox">
                                 <span class="avatar" title=u.username.clone()>{initials}</span>
                                 <span class="user-name">{u.display_name.clone()}</span>

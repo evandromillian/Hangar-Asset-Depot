@@ -7,6 +7,7 @@
 
 use crate::enums::{LodSource, PreviewKind, TextureSlot};
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 /// Bumped whenever the pipeline output changes in an incompatible way, so the
 /// server can re-process old versions on demand.
@@ -30,9 +31,14 @@ pub struct PreviewManifest {
     pub materials: Vec<MaterialInfo>,
     #[serde(default)]
     pub textures: Vec<TextureInfo>,
-    /// Animation clips baked into every LOD GLB, in GLB order.
+    /// Animation clips baked into every LOD GLB, in GLB order. For an
+    /// animation-only version (`kind: animation`): every clip of its files.
     #[serde(default)]
     pub animations: Vec<AnimationInfo>,
+    /// Animation-only versions: one entry per reference skeleton of
+    /// `.hangar/animation.json`, in that order.
+    #[serde(default)]
+    pub skeletons: Vec<SkeletonPreview>,
     pub stats: Option<ModelStats>,
     pub audio: Option<AudioInfo>,
     /// PNG thumbnail (software rendered for models, downscaled for images).
@@ -121,6 +127,62 @@ pub struct AnimationInfo {
     /// Version path of the separate animation file it came from (None: the model file).
     #[serde(default)]
     pub source: Option<String>,
+}
+
+/// The clips of an animation-only version retargeted (by bone name) onto a
+/// reference skeleton's mesh.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct SkeletonPreview {
+    /// Slug of the reference skeleton.
+    pub skeleton: String,
+    /// Its display name when the version was processed.
+    pub name: String,
+    /// Version of the skeleton asset the preview was built from.
+    pub version_id: Option<Uuid>,
+    pub version_number: Option<i32>,
+    /// The skeleton's mesh plus the retargeted clips; None when nothing could be built.
+    pub glb_hash: Option<String>,
+    #[serde(default)]
+    pub glb_size: u64,
+    /// Clips that move at least one bone of the skeleton, in GLB order.
+    #[serde(default)]
+    pub animations: Vec<AnimationInfo>,
+    /// Nodes of the animation files that have a same-named bone in the skeleton.
+    #[serde(default)]
+    pub bones_matched: u32,
+    #[serde(default)]
+    pub bones_total: u32,
+    pub stats: Option<ModelStats>,
+    /// Why there is no preview (skeleton unknown, no bone matches, ...).
+    pub error: Option<String>,
+}
+
+impl PreviewManifest {
+    /// An animation version seen on one of its skeletons, shaped like a model
+    /// manifest (a single LOD, the skeleton's clips) so the 3D viewer can show it.
+    pub fn on_skeleton(&self, slug: &str) -> Option<PreviewManifest> {
+        let s = self.skeletons.iter().find(|s| s.skeleton == slug)?;
+        let glb_hash = s.glb_hash.clone()?;
+        let stats = s.stats.clone();
+        Some(PreviewManifest {
+            kind: Some(PreviewKind::Model),
+            lods: vec![LodInfo {
+                level: 0,
+                source: LodSource::Authored,
+                triangles: stats.as_ref().map_or(0, |s| s.triangles),
+                vertices: stats.as_ref().map_or(0, |s| s.vertices),
+                glb_hash,
+                glb_size: s.glb_size,
+                ratio: 1.0,
+            }],
+            animations: s.animations.clone(),
+            stats,
+            skeletons: vec![],
+            variants: vec![],
+            materials: vec![],
+            ..self.clone()
+        })
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]

@@ -124,6 +124,8 @@ string_enum! {
     /// What kind of preview the pipeline produced for a version.
     PreviewKind {
         Model => "model",
+        // Animation files without a mesh, previewed on reference skeletons.
+        Animation => "animation",
         Image => "image",
         Audio => "audio",
         None => "none",

@@ -43,12 +43,22 @@ pub struct FbxProbe {
     pub has_animation: bool,
 }
 
-/// Cheap look into an FBX (geometry is not loaded).
-pub fn probe(path: &Path) -> Result<FbxProbe> {
+/// Cheap look into an FBX (geometry is not loaded). Baking the takes is the
+/// expensive part: with `check_animation` false it only happens for files
+/// without a mesh (`has_animation` stays false for the others).
+pub fn probe(path: &Path, check_animation: bool) -> Result<FbxProbe> {
     let scene = open(path, false)?;
     let has_mesh = scene.nodes.iter().any(|n| n.mesh.is_some());
-    let has_animation = !bake_clips(&scene, None, &|n| Some(n.element.typed_id as usize), &mut vec![]).is_empty();
+    let has_animation = (check_animation || !has_mesh)
+        && !bake_clips(&scene, None, &|n| Some(n.element.typed_id as usize), &mut vec![]).is_empty();
     Ok(FbxProbe { has_mesh, has_animation })
+}
+
+/// The moving takes of an animation file on its own (no model to retarget
+/// to): for listing the clips of a version that has no mesh.
+pub fn clips(path: &Path, rel: &str) -> Result<Vec<AnimClip>> {
+    let scene = open(path, false)?;
+    Ok(bake_clips(&scene, Some(rel), &|n| Some(n.element.typed_id as usize), &mut vec![]))
 }
 
 /// Loads the model at `path`. `anim_files` are (version path, file) of other FBX
@@ -61,7 +71,10 @@ pub fn load(path: &Path, base_dir: &str, anim_files: &[(String, std::path::PathB
     out.has_skin = !scene.skin_deformers.is_empty();
     let mut clips = bake_clips(&scene, None, &|n| Some(n.element.typed_id as usize), &mut out.warnings);
     for (rel, file) in anim_files {
-        clips.extend(external_clips(&scene, rel, file, &mut out.warnings));
+        let (file_clips, matched, total) = external_clips(&scene, rel, file, &mut out.warnings);
+        clips.extend(file_clips);
+        out.bones_matched += matched;
+        out.bones_total += total;
     }
     unique_names(&mut clips);
     let mut rig = (!clips.is_empty()).then(|| Rig { nodes: rig_nodes(&scene), skins: vec![], clips });
@@ -239,24 +252,47 @@ fn bake_clips(
     clips
 }
 
-/// Takes of a separate animation file, retargeted by node name onto `model`.
-fn external_clips(model: &ufbx::Scene, rel: &str, file: &Path, warnings: &mut Vec<String>) -> Vec<AnimClip> {
+/// Takes of a separate animation file, retargeted by node name onto `model`,
+/// plus (named nodes of the file that exist in the model, named nodes).
+fn external_clips(model: &ufbx::Scene, rel: &str, file: &Path, warnings: &mut Vec<String>) -> (Vec<AnimClip>, u32, u32) {
     let scene = match open(file, false) {
         Ok(s) => s,
         Err(e) => {
             warnings.push(format!("animation file {rel} skipped: {e:#}"));
-            return vec![];
+            return (vec![], 0, 0);
         }
     };
-    let mut by_name: HashMap<String, usize> = HashMap::new();
-    for n in &model.nodes {
-        by_name.entry(node_key(&n.element.name)).or_insert(n.element.typed_id as usize);
-    }
+    let by_name = nodes_by_name(model);
+    let (matched, total) = name_matches(&by_name, &scene);
     let clips = bake_clips(&scene, Some(rel), &|n| by_name.get(&node_key(&n.element.name)).copied(), warnings);
     if clips.is_empty() {
         warnings.push(format!("animation file {rel}: no animated node matches the model's nodes"));
     }
-    clips
+    (clips, matched, total)
+}
+
+fn nodes_by_name(model: &ufbx::Scene) -> HashMap<String, usize> {
+    let mut by_name: HashMap<String, usize> = HashMap::new();
+    for n in &model.nodes {
+        by_name.entry(node_key(&n.element.name)).or_insert(n.element.typed_id as usize);
+    }
+    by_name
+}
+
+/// (named nodes of `anim` that exist in the model, named nodes of `anim`).
+fn name_matches(by_name: &HashMap<String, usize>, anim: &ufbx::Scene) -> (u32, u32) {
+    let named: Vec<String> =
+        anim.nodes.iter().filter(|n| !n.is_root).map(|n| node_key(&n.element.name)).filter(|k| !k.is_empty()).collect();
+    (named.iter().filter(|k| by_name.contains_key(*k)).count() as u32, named.len() as u32)
+}
+
+/// Whether the animation file `anim` was made for the model at `model`: at
+/// least half of its named nodes exist in the model. A prop shipped with an
+/// animation pack (the weapon of "Rocket Launcher") shares none.
+pub fn animates(model: &Path, anim: &Path) -> Result<bool> {
+    let (model, anim) = (open(model, false)?, open(anim, false)?);
+    let (matched, total) = name_matches(&nodes_by_name(&model), &anim);
+    Ok(total > 0 && matched * 2 >= total)
 }
 
 /// Node name for matching across files: case-insensitive, without namespaces
@@ -286,7 +322,7 @@ fn clip_name(take: &str, source: Option<&str>, index: usize) -> String {
 }
 
 /// Clip names must be unique for the dropdown: repeated ones get " (2)", " (3)"...
-fn unique_names(clips: &mut [AnimClip]) {
+pub(crate) fn unique_names(clips: &mut [AnimClip]) {
     for i in 1..clips.len() {
         let base = clips[i].name.clone();
         let mut n = 1;

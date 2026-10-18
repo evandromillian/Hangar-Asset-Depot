@@ -1,6 +1,7 @@
 //! Asset page: preview stage + version history / files / details.
 
 use crate::api;
+use crate::components::animation::AnimationPanel;
 use crate::components::asset_form::EditAssetModal;
 use crate::components::common::{ErrorBanner, KindBadge};
 use crate::components::details::DetailsPanel;
@@ -10,7 +11,7 @@ use crate::components::new_version::NewVersionDialog;
 use crate::components::stage::Stage;
 use crate::components::versions::VersionTimeline;
 use crate::viewer::ViewerDraft;
-use hangar_core::{AssetDetail, UpdateAssetRequest, VersionDto, VersionStatus};
+use hangar_core::{AssetDetail, AssetKind, PreviewKind, UpdateAssetRequest, VersionDto, VersionStatus};
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use leptos_router::components::A;
@@ -23,6 +24,7 @@ enum Tab {
     Versions,
     Files,
     Materials,
+    Animation,
     Details,
 }
 
@@ -257,6 +259,18 @@ pub fn AssetPage() -> impl IntoView {
                         <button class="tab" class:active=move || tab.get() == Tab::Materials on:click=move |_| tab.set(Tab::Materials)>
                             "Materiais " <span class="count">{move || selected_version.get().and_then(|v| v.preview).map(|p| p.materials.len()).unwrap_or(0)}</span>
                         </button>
+                        <Show when=move || {
+                            tab.get() == Tab::Animation
+                                || asset_data.get().is_some_and(|a| a.summary.kind == AssetKind::Animation)
+                                || selected_version
+                                    .get()
+                                    .and_then(|v| v.preview)
+                                    .is_some_and(|p| p.kind == Some(PreviewKind::Animation) || !p.animations.is_empty())
+                        }>
+                            <button class="tab" class:active=move || tab.get() == Tab::Animation on:click=move |_| tab.set(Tab::Animation)>
+                                "Animação " <span class="count">{move || selected_version.get().and_then(|v| v.preview).map(|p| p.animations.len()).unwrap_or(0)}</span>
+                            </button>
+                        </Show>
                         <button class="tab" class:active=move || tab.get() == Tab::Details on:click=move |_| tab.set(Tab::Details)>
                             "Detalhes"
                         </button>
@@ -293,6 +307,17 @@ pub fn AssetPage() -> impl IntoView {
                                 />
                             }
                             .into_any(),
+                            Tab::Animation => view! {
+                                <AnimationPanel
+                                    version=selected_version
+                                    asset_id=aid_or_nil
+                                    can_write=can_write
+                                    on_reprocess=on_reprocess
+                                    on_committed=on_material_commit
+                                    on_add=open_add_files
+                                />
+                            }
+                            .into_any(),
                             Tab::Details => view! { <DetailsPanel asset=asset_sig version=selected_version /> }.into_any(),
                         }}
                     </div>
@@ -308,7 +333,13 @@ pub fn AssetPage() -> impl IntoView {
                         let default_parent = selected
                             .get_untracked()
                             .or_else(|| list.iter().find(|v| v.is_head).map(|v| v.id));
-                        let title = if adding_files.get_untracked() { "Adicionar ou substituir arquivos" } else { "Nova versão" };
+                        let package = asset_data.get_untracked().is_some_and(|a| a.summary.kind == AssetKind::Animation);
+                        let title = match (adding_files.get_untracked(), package) {
+                            (true, true) => "Adicionar animações ao pacote",
+                            (true, false) => "Adicionar ou substituir arquivos",
+                            (false, true) => "Nova versão do pacote de animações",
+                            (false, false) => "Nova versão",
+                        };
                         view! {
                             <NewVersionDialog
                                 title=title

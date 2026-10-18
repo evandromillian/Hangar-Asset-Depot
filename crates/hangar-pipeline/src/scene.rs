@@ -18,6 +18,9 @@ pub struct Scene {
     pub warnings: Vec<String>,
     /// Present only when the source has animation that actually moves something.
     pub rig: Option<Rig>,
+    /// Separate animation files: their named nodes found in this model / all of them.
+    pub bones_matched: u32,
+    pub bones_total: u32,
 }
 
 /// Node hierarchy, skins and baked animation clips of an animated source.

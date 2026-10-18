@@ -15,6 +15,8 @@ enum Mode {
     Processing,
     Failed,
     Model,
+    /// Animation-only version not previewed on any skeleton yet.
+    Unbound,
     Image,
     Audio,
     NoPreview,
@@ -27,6 +29,13 @@ fn mode_of(v: &Option<VersionDto>) -> Mode {
         VersionStatus::Failed => Mode::Failed,
         VersionStatus::Ready => match v.preview.as_ref().and_then(|p| p.kind) {
             Some(PreviewKind::Model) if v.preview.as_ref().is_some_and(|p| !p.lods.is_empty()) => Mode::Model,
+            Some(PreviewKind::Animation) => {
+                if v.preview.as_ref().is_some_and(|p| p.skeletons.iter().any(|s| s.glb_hash.is_some())) {
+                    Mode::Model
+                } else {
+                    Mode::Unbound
+                }
+            }
             Some(PreviewKind::Image) => Mode::Image,
             Some(PreviewKind::Audio) => Mode::Audio,
             _ => Mode::NoPreview,
@@ -51,6 +60,28 @@ pub fn Stage(
     move || match mode.get() {
         Mode::Model => view! { <ViewerPanel version=version asset_id=asset_id draft=draft /> }.into_any(),
         Mode::Image => view! { <TextureGallery version=version /> }.into_any(),
+        Mode::Unbound => view! {
+            <div class="stage-placeholder">
+                <div class="empty-code">"↻"</div>
+                <h3>
+                    {move || {
+                        let n = version.get().and_then(|v| v.preview).map(|p| p.animations.len()).unwrap_or(0);
+                        format!("{n} animaç{} sem malha", if n == 1 { "ão" } else { "ões" })
+                    }}
+                </h3>
+                <p class="muted">
+                    {move || {
+                        let bound = version.get().and_then(|v| v.preview).is_some_and(|p| !p.skeletons.is_empty());
+                        if bound {
+                            "Nenhum dos esqueletos escolhidos recebeu as animações — veja os detalhes na aba Animação."
+                        } else {
+                            "Escolha um esqueleto de referência na aba Animação para tocá-las."
+                        }
+                    }}
+                </p>
+            </div>
+        }
+        .into_any(),
         Mode::Audio => view! { <AudioPlayer version=version /> }.into_any(),
         Mode::Processing => view! {
             <div class="stage-placeholder">

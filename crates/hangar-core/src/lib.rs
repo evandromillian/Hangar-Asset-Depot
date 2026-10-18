@@ -3,12 +3,14 @@
 //! Everything in here is plain data + serde, so it compiles both for the
 //! server (native) and for the Leptos/Bevy client (wasm32).
 
+pub mod animation;
 pub mod api;
 pub mod enums;
 pub mod materials;
 pub mod paths;
 pub mod preview;
 
+pub use animation::*;
 pub use api::*;
 pub use enums::*;
 pub use materials::*;

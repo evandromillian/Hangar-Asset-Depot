@@ -331,10 +331,12 @@ fn localize(m: &MeshPrim, node: &SceneNode) -> (Vec<[f32; 3]>, Vec<[f32; 3]>) {
     (positions, normals)
 }
 
-/// Writes one animation sampler (input times + output values); None for an
-/// empty channel. Repeated times keep the last value (glTF needs strictly
-/// increasing input).
-fn sampler<const N: usize>(b: &mut Builder, keys: &[(f32, [f32; N])]) -> Option<(usize, usize)> {
+/// Keys ready for a glTF sampler: repeated times keep the last value (glTF
+/// needs strictly increasing input), and a channel that never changes becomes
+/// its first and last key. Exporters such as Unreal key every bone on every
+/// frame, so this keeps GLBs of big animation packages small. The channel is
+/// kept (not dropped) so a clip still overrides what the previous one left.
+fn clean_keys<const N: usize>(keys: &[(f32, [f32; N])]) -> Vec<(f32, [f32; N])> {
     let mut clean: Vec<(f32, [f32; N])> = Vec::with_capacity(keys.len());
     for &(t, v) in keys {
         match clean.last_mut() {
@@ -342,6 +344,19 @@ fn sampler<const N: usize>(b: &mut Builder, keys: &[(f32, [f32; N])]) -> Option<
             _ => clean.push((t, v)),
         }
     }
+    if let (Some(&first), Some(&last)) = (clean.first(), clean.last())
+        && clean.len() > 2
+        && clean.iter().all(|k| k.1.iter().zip(&first.1).all(|(a, b)| (a - b).abs() <= 1e-6))
+    {
+        return vec![first, (last.0, first.1)];
+    }
+    clean
+}
+
+/// Writes one animation sampler (input times + output values); None for an
+/// empty channel.
+fn sampler<const N: usize>(b: &mut Builder, keys: &[(f32, [f32; N])]) -> Option<(usize, usize)> {
+    let clean = clean_keys(keys);
     let (first, last) = (clean.first()?.0, clean.last()?.0);
     let times: Vec<[f32; 1]> = clean.iter().map(|k| [k.0]).collect();
     let values: Vec<[f32; N]> = clean.iter().map(|k| k.1).collect();
@@ -355,6 +370,14 @@ fn sampler<const N: usize>(b: &mut Builder, keys: &[(f32, [f32; N])]) -> Option<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn constant_channels_shrink_to_two_keys() {
+        let still: Vec<(f32, [f32; 3])> = (0..30).map(|i| (i as f32 / 30.0, [0.0, 1.0, 0.0])).collect();
+        assert_eq!(clean_keys(&still), vec![(0.0, [0.0, 1.0, 0.0]), (29.0 / 30.0, [0.0, 1.0, 0.0])]);
+        let moving = [(0.0, [0.0; 3]), (0.5, [1.0, 0.0, 0.0]), (0.5, [2.0, 0.0, 0.0]), (1.0, [0.0; 3])];
+        assert_eq!(clean_keys(&moving), vec![(0.0, [0.0; 3]), (0.5, [2.0, 0.0, 0.0]), (1.0, [0.0; 3])]);
+    }
 
     #[test]
     fn writes_valid_glb() {

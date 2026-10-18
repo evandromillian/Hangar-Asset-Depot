@@ -2,7 +2,10 @@
 
 use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, Statement, TransactionTrait};
 
-const MIGRATIONS: &[(&str, &str)] = &[("0001_init", include_str!("../migrations/0001_init.sql"))];
+const MIGRATIONS: &[(&str, &str)] = &[
+    ("0001_init", include_str!("../migrations/0001_init.sql")),
+    ("0002_skeletons", include_str!("../migrations/0002_skeletons.sql")),
+];
 
 pub async fn migrate(db: &DatabaseConnection) -> anyhow::Result<()> {
     db.execute_unprepared(

@@ -133,7 +133,7 @@ fn processes_tank_end_to_end() {
     let dir = tempfile::tempdir().unwrap();
     let files = make_tank(dir.path());
     let cfg = PipelineConfig { thumbnail_size: 256, ..Default::default() };
-    let res = process(&ProcessInput { root: dir.path(), files: &files }, &cfg).expect("pipeline");
+    let res = process(&ProcessInput { root: dir.path(), files: &files, skeletons: &[] }, &cfg).expect("pipeline");
     let m = &res.manifest;
 
     assert_eq!(m.kind, Some(PreviewKind::Model));
@@ -229,7 +229,7 @@ fn manual_material_config() {
     .unwrap();
     let files = entries(dir.path());
     assert!(files.iter().any(|f| f.path == MATERIAL_CONFIG_PATH && hangar_pipeline::is_relevant(&f.path)));
-    let res = process(&ProcessInput { root: dir.path(), files: &files }, &PipelineConfig::default()).unwrap();
+    let res = process(&ProcessInput { root: dir.path(), files: &files, skeletons: &[] }, &PipelineConfig::default()).unwrap();
     let m = &res.manifest;
     assert!(m.warnings.is_empty(), "warnings: {:?}", m.warnings);
 
@@ -263,7 +263,7 @@ fn image_only_version() {
         .iter()
         .map(|p| FileEntry { path: p.to_string(), hash: String::new(), size: 10 })
         .collect();
-    let res = process(&ProcessInput { root: dir.path(), files: &files }, &PipelineConfig::default()).unwrap();
+    let res = process(&ProcessInput { root: dir.path(), files: &files, skeletons: &[] }, &PipelineConfig::default()).unwrap();
     assert_eq!(res.manifest.kind, Some(PreviewKind::Image));
     assert_eq!(res.manifest.primary_file.as_deref(), Some("T_Rock_D.png"));
     assert!(res.manifest.thumbnail_hash.is_some());
@@ -279,13 +279,13 @@ fn missing_importer_degrades_to_images() {
         FileEntry { path: "tank.blend".into(), hash: String::new(), size: 12 },
         FileEntry { path: "T_Tank_D.png".into(), hash: String::new(), size: 10 },
     ];
-    let res = process(&ProcessInput { root: dir.path(), files: &files }, &PipelineConfig::default()).unwrap();
+    let res = process(&ProcessInput { root: dir.path(), files: &files, skeletons: &[] }, &PipelineConfig::default()).unwrap();
     assert_eq!(res.manifest.kind, Some(PreviewKind::Image));
     assert!(res.manifest.warnings[0].contains("3D preview unavailable"));
 
     // A lone unsupported model is an error.
     let files = vec![FileEntry { path: "tank.blend".into(), hash: String::new(), size: 12 }];
-    assert!(process(&ProcessInput { root: dir.path(), files: &files }, &PipelineConfig::default()).is_err());
+    assert!(process(&ProcessInput { root: dir.path(), files: &files, skeletons: &[] }, &PipelineConfig::default()).is_err());
 }
 
 /// Runs on a real FBX: `HANGAR_SAMPLE_FBX=/path/model.fbx cargo test -p hangar-pipeline -- --ignored`.
@@ -307,7 +307,7 @@ fn sample_fbx_from_env() {
         })
         .filter(|f| hangar_pipeline::is_relevant(&f.path))
         .collect();
-    let res = process(&ProcessInput { root: dir, files: &files }, &PipelineConfig::default()).unwrap();
+    let res = process(&ProcessInput { root: dir, files: &files, skeletons: &[] }, &PipelineConfig::default()).unwrap();
     let m = &res.manifest;
     println!("{}", serde_json::to_string_pretty(m).unwrap());
     assert_eq!(m.kind, Some(PreviewKind::Model));
@@ -337,7 +337,7 @@ fn authored_lod_files() {
     }
     std::fs::write(dir.path().join("tank.mtl"), "newmtl M_Tank_Body\nKd 0.5 0.5 0.4\n").unwrap();
     let files = entries(dir.path());
-    let res = process(&ProcessInput { root: dir.path(), files: &files }, &PipelineConfig::default()).unwrap();
+    let res = process(&ProcessInput { root: dir.path(), files: &files, skeletons: &[] }, &PipelineConfig::default()).unwrap();
     let m = &res.manifest;
     assert_eq!(m.primary_file.as_deref(), Some("Tank_LOD0.obj"));
     assert_eq!(m.lods.len(), 2, "{:?}", m.lods);
@@ -357,7 +357,7 @@ fn authored_lod_meshes_by_name() {
     std::fs::write(dir.path().join("tank.obj"), &obj.out).unwrap();
     std::fs::write(dir.path().join("tank.mtl"), "newmtl M_Tank_Body\nKd 0.5 0.5 0.4\n").unwrap();
     let files = entries(dir.path());
-    let res = process(&ProcessInput { root: dir.path(), files: &files }, &PipelineConfig::default()).unwrap();
+    let res = process(&ProcessInput { root: dir.path(), files: &files, skeletons: &[] }, &PipelineConfig::default()).unwrap();
     let m = &res.manifest;
     assert_eq!(m.lods.len(), 2);
     // the un-suffixed antenna (12 tris) is part of every level

@@ -9,7 +9,7 @@
 
 use glam::{Mat4, Quat, Vec3};
 use hangar_core::FileEntry;
-use hangar_pipeline::{process, ArtifactRole, PipelineConfig, ProcessInput};
+use hangar_pipeline::{process, ArtifactRole, PipelineConfig, ProcessInput, SkeletonSource};
 use std::fmt::Write as _;
 
 const KTIME_PER_SECOND: i64 = 46_186_158_000;
@@ -178,7 +178,7 @@ fn animated_fbx_exports_rig_and_clip() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("anim.fbx"), animated_fbx()).unwrap();
     let files = vec![FileEntry { path: "anim.fbx".into(), hash: String::new(), size: 1 }];
-    let res = process(&ProcessInput { root: dir.path(), files: &files }, &PipelineConfig::default()).expect("pipeline");
+    let res = process(&ProcessInput { root: dir.path(), files: &files, skeletons: &[] }, &PipelineConfig::default()).expect("pipeline");
     let m = &res.manifest;
     assert!(m.warnings.is_empty(), "warnings: {:?}", m.warnings);
 
@@ -276,7 +276,7 @@ fn separate_animation_files_animate_the_model() {
         .iter()
         .map(|p| FileEntry { path: p.to_string(), hash: String::new(), size: 1 })
         .collect();
-    let res = process(&ProcessInput { root: dir.path(), files: &files }, &PipelineConfig::default()).expect("pipeline");
+    let res = process(&ProcessInput { root: dir.path(), files: &files, skeletons: &[] }, &PipelineConfig::default()).expect("pipeline");
     let m = &res.manifest;
     assert!(m.warnings.is_empty(), "warnings: {:?}", m.warnings);
     assert_eq!(m.primary_file.as_deref(), Some("Shark.fbx"));
@@ -295,4 +295,135 @@ fn separate_animation_files_animate_the_model() {
     targets.sort();
     targets.dedup();
     assert!(targets.contains(&"Spinner") && targets.contains(&"Bone1"), "{targets:?}");
+}
+
+fn write_files(root: &std::path::Path, files: &[(&str, String)]) -> Vec<FileEntry> {
+    files
+        .iter()
+        .map(|(path, content)| {
+            let full = root.join(path);
+            std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+            std::fs::write(&full, content).unwrap();
+            FileEntry { path: path.to_string(), hash: String::new(), size: content.len() as i64 }
+        })
+        .collect()
+}
+
+/// A version with only an animation file and no skeleton bound: the clips are
+/// listed, nothing is rendered.
+#[test]
+fn animation_only_version_lists_its_clips() {
+    let dir = tempfile::tempdir().unwrap();
+    let clip = fbx(Parts { geometry: false, animated: true, bone_prefix: "", take: "Run" });
+    let files = write_files(dir.path(), &[("Run.fbx", clip)]);
+    let res = process(&ProcessInput { root: dir.path(), files: &files, skeletons: &[] }, &PipelineConfig::default()).expect("pipeline");
+    let m = &res.manifest;
+    assert_eq!(m.kind, Some(hangar_core::PreviewKind::Animation));
+    assert_eq!(m.primary_file.as_deref(), Some("Run.fbx"));
+    assert_eq!(m.animations.iter().map(|a| a.name.as_str()).collect::<Vec<_>>(), ["Run"]);
+    assert!(m.lods.is_empty() && m.skeletons.is_empty() && m.thumbnail_hash.is_none());
+    assert!(m.warnings.is_empty(), "warnings: {:?}", m.warnings);
+}
+
+/// Animation-only version bound to two reference skeletons: one whose bones
+/// match (clips retargeted across the `rig:` namespace, the skeleton's own
+/// take dropped) and one that shares no bone with the clip.
+#[test]
+fn animations_play_on_reference_skeletons() {
+    let skel = tempfile::tempdir().unwrap();
+    // The skeleton's model has a take of its own ("Mexer") that must not leak in.
+    let manny = fbx(Parts { geometry: true, animated: true, bone_prefix: "", take: "Mexer" });
+    let skel_files = write_files(skel.path(), &[("SKM_Manny.fbx", manny)]);
+    let other = tempfile::tempdir().unwrap();
+    let mut alien = fbx(Parts { geometry: true, animated: false, bone_prefix: "", take: "" });
+    for name in ["Spinner", "Bone0", "Bone1", "Tentacle"] {
+        alien = alien.replace(&format!("Model::{name}\""), &format!("Model::Alien{name}\""));
+    }
+    let other_files = write_files(other.path(), &[("Alien.fbx", alien)]);
+    let skeletons = vec![
+        SkeletonSource { slug: "ue5-manny".into(), name: "UE5 Manny".into(), root: skel.path().to_path_buf(), files: skel_files },
+        SkeletonSource { slug: "alien".into(), name: "Alien".into(), root: other.path().to_path_buf(), files: other_files },
+    ];
+
+    let dir = tempfile::tempdir().unwrap();
+    let clip = fbx(Parts { geometry: false, animated: true, bone_prefix: "rig:", take: "Take 001" });
+    let config = r#"{"skeletons":["ue5-manny","alien"]}"#.to_string();
+    let files = write_files(dir.path(), &[("anims/Manny@Bend.fbx", clip.clone()), (".hangar/animation.json", config)]);
+    let input = ProcessInput { root: dir.path(), files: &files, skeletons: &skeletons };
+    let res = process(&input, &PipelineConfig::default()).expect("pipeline");
+    let m = &res.manifest;
+    assert_eq!(m.kind, Some(hangar_core::PreviewKind::Animation));
+    assert_eq!(m.animations.iter().map(|a| a.name.as_str()).collect::<Vec<_>>(), ["Bend"]);
+    assert_eq!(m.skeletons.len(), 2);
+
+    let manny = &m.skeletons[0];
+    assert_eq!(manny.skeleton, "ue5-manny");
+    assert_eq!(manny.error, None);
+    assert_eq!(manny.animations.iter().map(|a| a.name.as_str()).collect::<Vec<_>>(), ["Bend"]);
+    assert_eq!((manny.bones_matched, manny.bones_total), (3, 3));
+    assert!(manny.stats.as_ref().unwrap().has_skin);
+    let glb = res.artifacts.iter().find(|a| a.role == ArtifactRole::SkeletonGlb("ue5-manny".into())).expect("skeleton glb");
+    assert_eq!(manny.glb_hash.as_deref(), Some(glb.hash.as_str()));
+    let g = gltf::Gltf::from_slice(&glb.bytes).unwrap();
+    assert_eq!(g.document.animations().count(), 1, "only the bound clip, not the skeleton's own take");
+    assert!(g.document.skins().next().is_some());
+    assert!(g.document.meshes().count() >= 2, "the skeleton's mesh is in the GLB");
+    let anim = g.document.animations().next().unwrap();
+    assert_eq!(anim.name(), Some("Bend"));
+    let targets: Vec<&str> = anim.channels().filter_map(|c| c.target().node().name()).collect();
+    assert!(targets.contains(&"Bone1") && targets.contains(&"Spinner"), "{targets:?}");
+
+    let alien = &m.skeletons[1];
+    assert!(alien.glb_hash.is_none() && alien.animations.is_empty());
+    assert!(alien.error.as_deref().is_some_and(|e| e.contains("0 of 3")), "{:?}", alien.error);
+    assert!(m.warnings.iter().any(|w| w.starts_with("skeleton Alien:")), "{:?}", m.warnings);
+
+    // Thumbnail of the posed skeleton.
+    let thumb = m.thumbnail_hash.as_deref().expect("thumbnail");
+    assert!(res.artifacts.iter().any(|a| a.hash == thumb && a.role == ArtifactRole::Thumbnail));
+
+    // A version with its own mesh keeps its animations on it.
+    let model = fbx(Parts { geometry: true, animated: false, bone_prefix: "", take: "" });
+    let files = write_files(dir.path(), &[("Manny.fbx", model), ("anims/Manny@Bend.fbx", clip)]);
+    let res = process(&ProcessInput { root: dir.path(), files: &files, skeletons: &skeletons }, &PipelineConfig::default()).unwrap();
+    assert_eq!(res.manifest.kind, Some(hangar_core::PreviewKind::Model));
+    assert!(res.manifest.skeletons.is_empty());
+    assert_eq!(res.manifest.animations.len(), 1);
+    assert!(res.manifest.warnings.iter().any(|w| w.contains("ignored")), "{:?}", res.manifest.warnings);
+}
+
+/// An animation package ("Rocket Launcher"): several animation files plus the
+/// weapon prop. The prop shares no bone with the clips, so it is not their
+/// mesh: the package is previewed on the reference skeleton with every clip.
+#[test]
+fn animation_package_with_a_prop_plays_on_the_skeleton() {
+    let skel = tempfile::tempdir().unwrap();
+    let skel_files = write_files(skel.path(), &[("SKM_Manny.fbx", fbx(Parts { geometry: true, animated: false, bone_prefix: "", take: "" }))]);
+    let skeletons = vec![SkeletonSource { slug: "ue5-manny".into(), name: "UE5 Manny".into(), root: skel.path().to_path_buf(), files: skel_files }];
+
+    let mut prop = fbx(Parts { geometry: true, animated: false, bone_prefix: "", take: "" });
+    for name in ["Spinner", "Bone0", "Bone1", "Tentacle"] {
+        prop = prop.replace(&format!("Model::{name}\""), &format!("Model::SM_Launcher_{name}\""));
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let files = write_files(
+        dir.path(),
+        &[
+            ("RocketLauncher/Anims/A_Fire.fbx", fbx(Parts { geometry: false, animated: true, bone_prefix: "", take: "A_Fire" })),
+            ("RocketLauncher/Anims/A_Reload.fbx", fbx(Parts { geometry: false, animated: true, bone_prefix: "", take: "Unreal Take" })),
+            ("RocketLauncher/Props/SM_RocketLauncher.fbx", prop),
+            (".hangar/animation.json", r#"{"skeletons":["ue5-manny"]}"#.into()),
+        ],
+    );
+    let res = process(&ProcessInput { root: dir.path(), files: &files, skeletons: &skeletons }, &PipelineConfig::default()).unwrap();
+    let m = &res.manifest;
+    assert_eq!(m.kind, Some(hangar_core::PreviewKind::Animation), "{:?}", m.warnings);
+    assert_eq!(m.animations.iter().map(|a| a.name.as_str()).collect::<Vec<_>>(), ["A_Fire", "A_Reload"]);
+    assert!(m.warnings.iter().any(|w| w.contains("SM_RocketLauncher.fbx")), "{:?}", m.warnings);
+    let manny = &m.skeletons[0];
+    assert_eq!(manny.error, None);
+    assert_eq!(manny.animations.len(), 2);
+    let glb = res.artifacts.iter().find(|a| a.role == ArtifactRole::SkeletonGlb("ue5-manny".into())).unwrap();
+    let g = gltf::Gltf::from_slice(&glb.bytes).unwrap();
+    assert_eq!(g.document.animations().count(), 2);
 }

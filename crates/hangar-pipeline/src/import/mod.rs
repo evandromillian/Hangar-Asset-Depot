@@ -9,17 +9,17 @@ use crate::scene::{ensure_normals, Scene};
 use crate::PipelineConfig;
 use anyhow::{anyhow, Result};
 use hangar_core::paths;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-/// Import a version file (`rel` relative to `root`). `anim_files` are other
-/// version files holding animations for this model (FBX primaries only).
-pub fn import(root: &Path, rel: &str, cfg: &PipelineConfig, anim_files: &[String]) -> Result<Scene> {
+/// Import a version file (`rel` relative to `root`). `anim_files` are
+/// (version path, file on disk) of FBX files holding animations for this model
+/// (FBX primaries only); they may live outside `root` (reference skeletons).
+pub fn import(root: &Path, rel: &str, cfg: &PipelineConfig, anim_files: &[(String, PathBuf)]) -> Result<Scene> {
     let path = root.join(rel);
     let base_dir = paths::parent(rel).to_string();
     let ext = paths::extension(rel);
-    let anims: Vec<(String, std::path::PathBuf)> = anim_files.iter().map(|a| (a.clone(), root.join(a))).collect();
     let native = match ext.as_str() {
-        "fbx" => Some(fbx::load(&path, &base_dir, &anims)),
+        "fbx" => Some(fbx::load(&path, &base_dir, anim_files)),
         "glb" | "gltf" => Some(gltf_import::load(&path, &base_dir, "gltf")),
         "obj" => Some(obj::load(&path, &base_dir)),
         _ => None,
@@ -47,7 +47,7 @@ pub fn import(root: &Path, rel: &str, cfg: &PipelineConfig, anim_files: &[String
     if ext != "fbx" && !anim_files.is_empty() {
         scene.warnings.push(format!(
             "separate animation files need an FBX model; not applied: {}",
-            anim_files.join(", ")
+            anim_files.iter().map(|(rel, _)| rel.as_str()).collect::<Vec<_>>().join(", ")
         ));
     }
     for m in &mut scene.meshes {

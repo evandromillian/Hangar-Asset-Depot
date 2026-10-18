@@ -1,3 +1,4 @@
+pub mod animation;
 pub mod asset_form;
 pub mod common;
 pub mod details;

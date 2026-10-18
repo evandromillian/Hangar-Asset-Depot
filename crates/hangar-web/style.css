@@ -571,6 +571,56 @@ select { appearance: none; background-image: linear-gradient(45deg, transparent 
 .inherit-list { list-style: none; margin: 8px 0 0; padding: 0; max-height: 200px; overflow: auto; }
 .inherit-list li { display: flex; justify-content: space-between; gap: 10px; padding: 3px 0; font-size: 12px; }
 
+/* Animation tab */
+.anim-panel { display: flex; flex-direction: column; gap: 18px; }
+.anim-panel .hint { font-size: 11.5px; margin: 0; }
+.clip-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
+.clip-row {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 10px; padding: 5px 2px;
+  border-bottom: 1px solid var(--line); font-size: 12.5px;
+}
+.clip-row .mono { font-size: 11px; }
+.clip-name { overflow-wrap: anywhere; }
+.clip-src { grid-column: 1 / -1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.clip-folder { margin: 6px 0 0; font-size: 11px; color: var(--text-2); }
+.anim-pkg-head { display: flex; align-items: center; gap: 8px; }
+.kind-hint { margin: -4px 0 0; font-size: 11.5px; }
+.skel-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.skel-row { border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel-2); }
+.skel-row.missing { border-style: dashed; }
+.skel-pick { display: grid; grid-template-columns: 16px 44px minmax(0, 1fr); gap: 10px; align-items: center; padding: 7px 10px; cursor: pointer; }
+.skel-thumb { width: 44px; height: 44px; border-radius: 4px; overflow: hidden; border: 1px solid var(--line); display: block; }
+.skel-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.skel-text { display: flex; flex-direction: column; min-width: 0; font-size: 12.5px; }
+.skel-text .mono { font-size: 11px; }
+.skel-name { color: var(--text); font-weight: 500; }
+.skel-status { font-size: 11.5px; overflow-wrap: anywhere; }
+.st-ok { color: var(--ok); }
+.st-stale { color: var(--accent); }
+.st-error { color: var(--danger); }
+.st-pending { color: var(--muted); }
+.tool-group.hidden { display: none; }
+
+/* Reference skeletons (admin) */
+.topbar-link { color: var(--text-2); font-size: 13px; }
+.topbar-link:hover { color: var(--accent); text-decoration: none; }
+.page-intro { max-width: 860px; margin: -8px 0 18px; font-size: 13px; }
+.page > .banner { margin-bottom: 14px; }
+.skel-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 14px; }
+.skel-card {
+  display: grid; grid-template-columns: 120px minmax(0, 1fr); gap: 14px; padding: 14px;
+  background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius-lg);
+}
+.skel-card-thumb { width: 120px; height: 120px; border-radius: var(--radius); overflow: hidden; border: 1px solid var(--line); display: block; }
+.skel-card-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.skel-card-body { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.skel-card-top { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.skel-card-top h2 { font-size: 17px; }
+.skel-card .kv { grid-template-columns: 84px minmax(0, 1fr); }
+.skel-card-actions { display: flex; gap: 6px; flex-wrap: wrap; margin-top: auto; }
+.skel-warn { margin: 0; font-size: 12px; color: #ffd58a; }
+.skel-stale { color: var(--accent); }
+
 /* ---------------------------------------------------------------- responsive */
 @media (max-width: 1180px) {
   .asset-layout { grid-template-columns: minmax(0, 1fr); }
@@ -590,5 +640,8 @@ select { appearance: none; background-image: linear-gradient(45deg, transparent 
   .file-row { grid-template-columns: 16px minmax(0, 1fr) auto 28px; }
   .file-hash { display: none; }
   .kv { grid-template-columns: 96px minmax(0, 1fr); }
+  .skel-grid { grid-template-columns: minmax(0, 1fr); }
+  .skel-card { grid-template-columns: 72px minmax(0, 1fr); }
+  .skel-card-thumb { width: 72px; height: 72px; }
 }
 .btn-danger { border-color: var(--danger); color: #ffb3ad; background: var(--danger-soft); }

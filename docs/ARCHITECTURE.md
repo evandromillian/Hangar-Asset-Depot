@@ -80,7 +80,8 @@ relevantes (modelos, imagens, áudio) para um diretório temporário e chama
    perdem a preferência. Os demais FBX cujos takes se movem são **arquivos de animação**: os
    takes são aplicados ao modelo casando nós pelo nome (sem maiúsculas e sem namespace —
    `mixamorig:Hips` ↔ `Hips`); takes com nome genérico ("Take 001", "mixamo.com") recebem o
-   nome do arquivo (`Shark@Swim.fbx` → "Swim").
+   nome do arquivo (`Shark@Swim.fbx` → "Swim"). Uma versão **só com animações** (nenhum
+   FBX com malha) vira `kind: animation`: ver *Esqueletos de referência* abaixo.
 2. **Importação** — `ufbx` (FBX, normaliza para Y-up/metros), `gltf` e `tobj`.
    Formatos não suportados nativamente (ex.: `.blend`) ou falhas caem no **fallback do
    Blender headless** (`tools/blender/export_glb.py`), quando configurado.
@@ -137,6 +138,42 @@ versão** que herda a anterior e acrescenta só este arquivo — nenhuma textura
   inexistente) viram `warnings`. A CLI envia o arquivo quando ele existe na pasta, e
   `--mirror` nunca o apaga.
 
+### Esqueletos de referência (`.hangar/animation.json`)
+
+Animações exportadas sem malha (ex.: animações do Unreal, só os ossos) não têm onde tocar.
+Para elas existe uma configuração do sistema, **Esqueletos** (`/admin/skeletons`, só
+admins): cada esqueleto tem nome, um identificador imutável (`ue5-manny`) e aponta para um
+**asset de modelo comum** (o FBX do SK_Mannequin / SKM_Manny com skin e texturas, enviado
+como qualquer asset). Sempre vale a versão *head* desse asset.
+
+* A aba **Animação** de uma versão só com animações lista os clipes e os esqueletos
+  cadastrados; marcar esqueletos e salvar cria uma **nova versão** com
+  `{"skeletons": ["ue5-manny", "ue4-mannequin"]}` em `.hangar/animation.json`.
+* No processamento, o worker resolve cada identificador para a head do asset do esqueleto,
+  baixa os arquivos dela para outro diretório temporário e passa como
+  `ProcessInput::skeletons`. Para cada esqueleto o pipeline importa o FBX do modelo com os
+  arquivos de animação da versão como fontes externas (ossos casados pelo nome, como em
+  `Modelo@Clipe.fbx`), descarta os takes do próprio modelo e grava um GLB (texturas ≤ 1024
+  px; rendition `skeleton_glb`, chave = identificador). O manifesto ganha uma entrada em
+  `skeletons` por identificador, na ordem do arquivo: GLB, clipes que movem algum osso,
+  `bones_matched`/`bones_total`, versão do esqueleto usada e `error` quando nada casou ou o
+  esqueleto não existe. A thumbnail é o primeiro esqueleto no meio do primeiro clipe
+  (pose calculada na CPU, `pose.rs`). `animations` lista todos os clipes dos arquivos.
+* Um asset de animação é um **pacote** ("Rocket Launcher", "Free Fall"): uma versão com
+  um ou vários FBX de animação, organizados em pastas à vontade; o botão **+ Adicionar
+  animações** da aba cria uma versão nova do mesmo pacote, que herda o
+  `.hangar/animation.json`. Clipes de pastas diferentes aparecem agrupados.
+* **Animações enviadas junto com uma malha tocam só nela**: se a versão tem um FBX com
+  geometria *feito para essas animações* (metade ou mais dos nós de um arquivo de animação
+  existem nele, `fbx::animates`), `.hangar/animation.json` é ignorado (com aviso). Malhas
+  que não compartilham ossos com as animações — a arma que acompanha um pacote — não são a
+  malha delas: ficam fora da pré-visualização (aviso) e o pacote toca nos esqueletos.
+* Canais constantes (o Unreal grava todos os ossos em todo quadro) viram duas chaves no GLB,
+  o que mantém pequenos os GLBs de pacotes grandes.
+* Cada animação guarda a própria cópia do GLB do esqueleto; um modelo novo do esqueleto só
+  vale depois de reprocessar. A página de esqueletos mostra quantas animações estão
+  desatualizadas e tem **Reprocessar animações** (heads que usam o esqueleto).
+
 ## Viewer 3D
 
 Bevy 0.19 roda dentro de um `<canvas>` gerenciado pelo Leptos (`leptos-bevy-canvas`).
@@ -144,6 +181,8 @@ O Leptos faz todo o HTTP e envia mensagens ao Bevy:
 
 * `LoadModel { bytes }` — GLB do LOD escolhido (via fonte de assets em memória);
   a câmera é preservada entre versões, então alternar v1/v2 funciona como comparação A/B.
+  Em versões só com animações, o seletor de LOD vira o seletor de **esqueleto**
+  (`PreviewManifest::on_skeleton` monta um manifesto de modelo com o GLB do esqueleto).
 * `ApplyVariant { textures, hidden }` — troca as texturas dos materiais por nome e oculta
   texturas (pré-visualização da aba Materiais).
 * `SetWireframe`, `SetAutoRotate`, `SetGrid`, `ResetCamera`.
@@ -168,6 +207,7 @@ asset_versions(id, asset_id, number, parent_id, message, author_id, status, erro
 version_files(version_id, path, blob_hash, size)          -- a árvore
 renditions(version_id, kind, key, blob_hash, meta)         -- LOD GLBs, thumbs, previews
 jobs(id, kind, payload, status, attempts, max_attempts, run_after, locked_at, last_error)
+skeletons(id, slug, name, description, asset_id, created_by, created_at)  -- esqueletos de referência
 ```
 
 As migrations são SQL puro embutido no binário (`crates/hangar-server/migrations`),
@@ -214,6 +254,10 @@ Autenticação: cookie `hangar_token` (HttpOnly, definido no login) ou
 | POST | `/api/blobs/missing` | `MissingBlobsRequest` → `MissingBlobsResponse` |
 | PUT | `/api/blobs/{hash}` | corpo cru → `BlobUploaded` |
 | GET | `/api/blobs/{hash}` | bytes (cache imutável) |
+| GET | `/api/skeletons` | `Vec<SkeletonDto>` (qualquer usuário logado) |
+| POST | `/api/skeletons` | admin: `CreateSkeletonRequest` → `SkeletonDto` |
+| PATCH/DELETE | `/api/skeletons/{id}` | admin: `UpdateSkeletonRequest` → `SkeletonDto` / 204 |
+| POST | `/api/skeletons/{id}/reprocess` | admin: reprocessa as heads que usam o esqueleto → `ReprocessQueued` |
 | GET | `/api/jobs?status=` | admin: `Vec<JobDto>` |
 | POST | `/api/admin/gc?grace_hours=24` | admin: apaga blobs não referenciados |
 

@@ -17,6 +17,7 @@ pub mod glb;
 pub mod images;
 pub mod import;
 pub mod lod;
+pub mod pose;
 mod process;
 pub mod raster;
 pub mod scene;
@@ -64,6 +65,19 @@ impl Default for PipelineConfig {
 pub struct ProcessInput<'a> {
     pub root: &'a Path,
     pub files: &'a [FileEntry],
+    /// The reference skeletons named by the version's `.hangar/animation.json`
+    /// (resolved by the caller), in that order. Used only when the version has
+    /// animation files and no mesh of its own.
+    pub skeletons: &'a [SkeletonSource],
+}
+
+/// The head version of a reference skeleton's asset, materialised on disk like
+/// a [`ProcessInput`] (relevant files only).
+pub struct SkeletonSource {
+    pub slug: String,
+    pub name: String,
+    pub root: PathBuf,
+    pub files: Vec<FileEntry>,
 }
 
 /// What a generated artifact is used for.
@@ -75,6 +89,8 @@ pub enum ArtifactRole {
     Thumbnail,
     /// Web preview (PNG/JPEG) of the texture at this version-relative path.
     TexturePreview(String),
+    /// GLB of a reference skeleton (slug) playing the version's animations.
+    SkeletonGlb(String),
 }
 
 /// A blob produced by the pipeline; `hash` is the BLAKE3 hex of `bytes` and is
@@ -100,10 +116,11 @@ pub struct ProcessOutput {
 }
 
 /// Whether a file is needed by the pipeline (models, images, audio, sidecar
-/// files such as `.mtl` / `.bin`, and the manual material configuration).
+/// files such as `.mtl` / `.bin`, and the `.hangar/` configuration files).
 pub fn is_relevant(path: &str) -> bool {
     let ext = hangar_core::paths::extension(path);
     path == hangar_core::MATERIAL_CONFIG_PATH
+        || path == hangar_core::ANIMATION_CONFIG_PATH
         || hangar_core::paths::is_model(path)
         || hangar_core::paths::is_image(path)
         || hangar_core::paths::is_audio(path)

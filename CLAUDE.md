@@ -119,6 +119,17 @@ prepared statements. Add `?sslmode=require`.
   The manifest's `animations` must stay in GLB clip order — the viewer loads `#AnimationN` by index.
   Other FBX files of the version whose takes move are animation sources for an FBX primary
   (`fbx::probe` classifies them; clips are retargeted by node name in `fbx::external_clips`).
+- A version whose FBX files have animation but no mesh is `PreviewKind::Animation`. It is
+  previewed on the **reference skeletons** named in its `.hangar/animation.json`
+  (`hangar_core::AnimationConfig`, slugs of the `skeletons` table = system setting, admin
+  only). The job worker materialises each skeleton asset's head version and passes it as
+  `ProcessInput::skeletons`; the pipeline writes one `ArtifactRole::SkeletonGlb(slug)` per
+  skeleton (rendition `skeleton_glb`) and a `SkeletonPreview` per slug in
+  `manifest.skeletons` (config order, `error` when it can't be built). Versions with their
+  own mesh ignore the binding — their animations only play on that mesh. "Own" means the
+  animation files were made for it (`fbx::animates`: half of a file's named nodes exist in
+  the mesh); meshes sharing no bones (props of an animation package) are ignored instead.
+  An animation asset is a package: any number of animation FBX files, added over versions.
 - Recoverable problems go to `manifest.warnings`, not errors. Fail only when nothing can be previewed.
 - Heuristics (texture resolution, slot tokens, variant detection, LOD suffixes) are unit-tested in
   their modules; extend those tests when changing them.
@@ -151,6 +162,8 @@ prepared statements. Add `?sslmode=require`.
 
 ## Known gaps / next steps
 
+- Skeleton GLBs are baked per animation version (copy of the mesh each); a new skeleton
+  version only applies after `POST /api/skeletons/{id}/reprocess`.
 - No DDS/PSD/EXR texture previews. Animation is exported for FBX only (node + skeletal, no morph
   targets); glTF/OBJ sources are still flattened, and their animations are not exported.
 - Blender fallback is implemented but was never run against a real Blender in CI.

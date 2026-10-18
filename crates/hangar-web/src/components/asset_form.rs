@@ -114,6 +114,12 @@ fn FieldsView(f: Fields, creating: bool) -> impl IntoView {
                         .collect_view()}
                 </select>
             </label>
+            <Show when=move || f.kind.get() == AssetKind::Animation>
+                <p class="muted hint span-2 kind-hint">
+                    "Um asset de animação é um pacote (ex.: \"Rocket Launcher\", \"Free Fall\"): envie todos os FBX juntos, "
+                    "mesmo que seja um só — dá para acrescentar mais animações depois. Animações sem malha tocam nos esqueletos de referência."
+                </p>
+            </Show>
             // Not a <label>: a click on it would be forwarded to the first chip's remove button.
             <div class="field span-2">
                 <span>"Tags " <small class="muted">"(Enter, vírgula ou espaço para adicionar)"</small></span>

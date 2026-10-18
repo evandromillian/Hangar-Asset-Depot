@@ -4,17 +4,22 @@ use crate::glb::{self, EncodedImage, GlbMaterial};
 use crate::images::{self, Decoded, ImageCache};
 use crate::lod::{self, LodLevel};
 use crate::raster::{self, ThumbMaterial};
-use crate::scene::{Aabb, Material, MeshPrim, Scene};
+use crate::scene::{Aabb, AnimClip, Material, MeshPrim, Scene};
 use crate::textures::{self, ImageIndex, ResolvedTexture};
 use crate::variants::{self, UsedTexture};
-use crate::{import, Artifact, ArtifactRole, PipelineConfig, ProcessInput, ProcessOutput};
-use anyhow::{anyhow, Result};
+use crate::{import, pose, Artifact, ArtifactRole, PipelineConfig, ProcessInput, ProcessOutput, SkeletonSource};
+use anyhow::{anyhow, bail, Result};
 use hangar_core::{
     paths, AnimationInfo, LodInfo, MaterialInfo, MaterialTexture, ModelStats, PreviewKind, PreviewManifest, TextureInfo,
-    MaterialConfig, TextureOverride, TextureSlot, VariantInfo, MATERIAL_CONFIG_PATH, PIPELINE_VERSION,
+    MaterialConfig, SkeletonPreview, TextureOverride, TextureSlot, VariantInfo, MATERIAL_CONFIG_PATH, PIPELINE_VERSION,
 };
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+
+/// Texture size of the reference-skeleton GLBs: every animation bound to a
+/// skeleton stores its own copy of the mesh, so keep them light.
+const SKELETON_TEXTURE_SIZE: u32 = 1024;
 
 struct Out {
     artifacts: Vec<Artifact>,
@@ -43,7 +48,7 @@ pub fn run(input: &ProcessInput, cfg: &PipelineConfig) -> Result<ProcessOutput> 
     let mut manifest = PreviewManifest { pipeline_version: PIPELINE_VERSION, ..Default::default() };
     let mut warnings: Vec<String> = Vec::new();
     let mut cache = ImageCache::new(cfg.max_texture_size);
-    let manual = load_material_config(input, &files, &mut warnings);
+    let manual = load_material_config(input.root, &files, &mut warnings);
 
     // ---- texture previews -------------------------------------------------
     let mut preview_by_path: HashMap<String, String> = HashMap::new();
@@ -82,19 +87,40 @@ pub fn run(input: &ProcessInput, cfg: &PipelineConfig) -> Result<ProcessOutput> 
     }
 
     // ---- model ------------------------------------------------------------
-    // With several FBX files, look inside them: animation-only files can't be the
-    // preview model, and files whose takes move feed the model's animations.
+    // Look inside the FBX files: animation-only files can't be the preview
+    // model, and files whose takes move feed the model's animations (with a
+    // single FBX, takes are only baked here when it has no mesh).
     let fbx_count = models.iter().filter(|m| paths::extension(m) == "fbx").count();
-    let probes: HashMap<&String, import::fbx::FbxProbe> = if fbx_count > 1 {
-        models
+    let probes: HashMap<&String, import::fbx::FbxProbe> = models
+        .iter()
+        .filter(|m| paths::extension(m) == "fbx")
+        .filter_map(|m| import::fbx::probe(&input.root.join(m), fbx_count > 1).ok().map(|p| (m, p)))
+        .collect();
+    let mut candidates: Vec<String> = models.iter().filter(|m| probes.get(m).is_none_or(|p| p.has_mesh)).cloned().collect();
+    let anim_only: Vec<String> =
+        models.iter().filter(|m| probes.get(m).is_some_and(|p| !p.has_mesh && p.has_animation)).cloned().collect();
+    // An animation package may ship props (the weapon of "Rocket Launcher"):
+    // a mesh is the animations' own only if they were made for its bones (a
+    // few files are enough to tell). With no such mesh the version is a
+    // package, previewed on reference skeletons; the props are listed as ignored.
+    if !anim_only.is_empty() && !candidates.is_empty() {
+        let owners: Vec<String> = candidates
             .iter()
             .filter(|m| paths::extension(m) == "fbx")
-            .filter_map(|m| import::fbx::probe(&input.root.join(m)).ok().map(|p| (m, p)))
-            .collect()
-    } else {
-        HashMap::new()
-    };
-    let candidates: Vec<String> = models.iter().filter(|m| probes.get(m).is_none_or(|p| p.has_mesh)).cloned().collect();
+            .filter(|m| {
+                anim_only.iter().take(3).any(|a| import::fbx::animates(&input.root.join(m), &input.root.join(a)).unwrap_or(false))
+            })
+            .cloned()
+            .collect();
+        if owners.is_empty() {
+            warnings.push(format!(
+                "{} model file(s) share no bones with the animation files, so they are not previewed: {}",
+                candidates.len(),
+                candidates.iter().take(5).cloned().collect::<Vec<_>>().join(", ")
+            ));
+        }
+        candidates = owners;
+    }
     let mut model_done = false;
     if let Some(mut sel) = select_model(&candidates) {
         let anim_files: Vec<String> = if paths::extension(&sel.primary) == "fbx" {
@@ -107,6 +133,12 @@ pub fn run(input: &ProcessInput, cfg: &PipelineConfig) -> Result<ProcessOutput> 
         } else {
             vec![]
         };
+        if !input.skeletons.is_empty() {
+            warnings.push(format!(
+                "the version has its own mesh, so its animations play on it: the reference skeletons of {} are ignored",
+                hangar_core::ANIMATION_CONFIG_PATH
+            ));
+        }
         // Models that are neither previewed nor animation sources.
         sel.ignored = models
             .iter()
@@ -120,6 +152,7 @@ pub fn run(input: &ProcessInput, cfg: &PipelineConfig) -> Result<ProcessOutput> 
                 sel.ignored.iter().take(5).cloned().collect::<Vec<_>>().join(", ")
             ));
         }
+        let anim_files: Vec<(String, PathBuf)> = anim_files.into_iter().map(|a| (a.clone(), input.root.join(a))).collect();
         let ctx = ModelInputs {
             sel: &sel,
             images: &images,
@@ -136,6 +169,9 @@ pub fn run(input: &ProcessInput, cfg: &PipelineConfig) -> Result<ProcessOutput> 
                 warnings.insert(0, format!("3D preview unavailable for {}: {e:#}", sel.primary));
             }
         }
+    } else if !anim_only.is_empty() {
+        build_animation(input, cfg, &anim_only, &mut out, &mut manifest, &mut warnings);
+        model_done = true;
     }
 
     if !model_done {
@@ -246,12 +282,12 @@ fn merge_materials(dst: &mut Vec<Material>, src: &[Material]) -> Vec<usize> {
 /// Reads `.hangar/materials.json` when the version has one. A broken file is a
 /// warning: the model is still previewed with automatic resolution.
 fn load_material_config(
-    input: &ProcessInput,
+    root: &Path,
     files: &[&hangar_core::FileEntry],
     warnings: &mut Vec<String>,
 ) -> Option<MaterialConfig> {
     files.iter().find(|f| f.path == MATERIAL_CONFIG_PATH)?;
-    let parsed = std::fs::read(input.root.join(MATERIAL_CONFIG_PATH))
+    let parsed = std::fs::read(root.join(MATERIAL_CONFIG_PATH))
         .map_err(anyhow::Error::from)
         .and_then(|b| MaterialConfig::from_json(&b).map_err(anyhow::Error::from));
     match parsed {
@@ -268,8 +304,8 @@ struct ModelInputs<'a> {
     images: &'a [String],
     preview_by_path: &'a HashMap<String, String>,
     manual: Option<&'a MaterialConfig>,
-    /// Other FBX files whose takes animate the primary model.
-    anim_files: &'a [String],
+    /// Other FBX files (version path, file) whose takes animate the primary model.
+    anim_files: &'a [(String, PathBuf)],
 }
 
 fn build_model(
@@ -379,19 +415,7 @@ fn build_model(
         })
         .collect();
 
-    // Decode every texture once.
-    let decoded: Vec<Vec<(TextureSlot, Arc<Decoded>)>> = materials
-        .iter()
-        .zip(&resolved)
-        .map(|(m, rs)| {
-            rs.iter()
-                .filter_map(|r| {
-                    let d = decode_resolved(input, cache, &m.name, r)?;
-                    Some((r.slot, d))
-                })
-                .collect()
-        })
-        .collect();
+    let decoded = decode_all(input.root, cache, &materials, &resolved);
 
     // ---- GLB per level
     for level in &levels {
@@ -412,6 +436,194 @@ fn build_model(
     }
 
     // ---- thumbnail
+    let thumb = render_thumbnail(&levels[0].meshes, &materials, &decoded, cfg.thumbnail_size);
+    manifest.thumbnail_hash = Some(out.push(Artifact::new(ArtifactRole::Thumbnail, "image/png", thumb)));
+
+    // ---- stats
+    let lod0: &[MeshPrim] = &levels[0].meshes;
+    let bounds = Aabb::of_meshes(lod0);
+    let used_materials: HashSet<usize> = lod0.iter().filter_map(|m| m.material).collect();
+    manifest.stats = Some(ModelStats {
+        meshes: lod0.len() as u32,
+        materials: used_materials.len() as u32,
+        triangles: levels[0].triangles(),
+        vertices: levels[0].vertices(),
+        bounds_min: if bounds.is_valid() { bounds.min } else { [0.0; 3] },
+        bounds_max: if bounds.is_valid() { bounds.max } else { [0.0; 3] },
+        has_uvs: lod0.iter().any(|m| !m.uvs.is_empty()),
+        has_normals: scene.source_had_normals,
+        has_skin: scene.has_skin,
+        animations: scene.animations,
+    });
+    manifest.kind = Some(PreviewKind::Model);
+    manifest.primary_file = Some(sel.primary.clone());
+    manifest.importer = Some(scene.importer.to_string());
+    manifest.animations = scene.rig.iter().flat_map(|r| &r.clips).map(anim_info).collect();
+    Ok(())
+}
+
+fn anim_info(c: &AnimClip) -> AnimationInfo {
+    AnimationInfo {
+        name: c.name.clone(),
+        duration_secs: c.duration,
+        fps: c.fps,
+        frames: (c.duration * c.fps).round() as u32 + 1,
+        source: c.source.clone(),
+    }
+}
+
+/// Animation files without a mesh: list their clips and, for every reference
+/// skeleton the version is bound to, build a GLB of the skeleton's mesh playing
+/// them. The first skeleton that works gives the thumbnail (mid-clip pose).
+fn build_animation(
+    input: &ProcessInput,
+    cfg: &PipelineConfig,
+    anim_files: &[String],
+    out: &mut Out,
+    manifest: &mut PreviewManifest,
+    warnings: &mut Vec<String>,
+) {
+    manifest.kind = Some(PreviewKind::Animation);
+    manifest.primary_file = anim_files.first().cloned();
+    manifest.importer = Some("ufbx".to_string());
+    let mut all: Vec<AnimClip> = Vec::new();
+    for rel in anim_files {
+        match import::fbx::clips(&input.root.join(rel), rel) {
+            Ok(c) => all.extend(c),
+            Err(e) => warnings.push(format!("animation file {rel} skipped: {e:#}")),
+        }
+    }
+    import::fbx::unique_names(&mut all);
+    manifest.animations = all.iter().map(anim_info).collect();
+
+    let files: Vec<(String, PathBuf)> = anim_files.iter().map(|a| (a.clone(), input.root.join(a))).collect();
+    for sk in input.skeletons {
+        let mut entry = SkeletonPreview { skeleton: sk.slug.clone(), name: sk.name.clone(), ..Default::default() };
+        match build_on_skeleton(sk, &files, cfg, out, manifest.thumbnail_hash.is_none()) {
+            Ok(b) => {
+                if b.bones_total > 0 && b.bones_matched * 2 < b.bones_total {
+                    warnings.push(format!(
+                        "skeleton {}: only {} of {} nodes of the animation files exist in it",
+                        sk.name, b.bones_matched, b.bones_total
+                    ));
+                }
+                if b.thumbnail.is_some() {
+                    manifest.thumbnail_hash = b.thumbnail;
+                }
+                entry.glb_hash = Some(b.glb_hash);
+                entry.glb_size = b.glb_size;
+                entry.animations = b.animations;
+                entry.bones_matched = b.bones_matched;
+                entry.bones_total = b.bones_total;
+                entry.stats = Some(b.stats);
+            }
+            Err(e) => {
+                warnings.push(format!("skeleton {}: {e:#}", sk.name));
+                entry.error = Some(format!("{e:#}"));
+            }
+        }
+        manifest.skeletons.push(entry);
+    }
+}
+
+struct OnSkeleton {
+    glb_hash: String,
+    glb_size: u64,
+    animations: Vec<AnimationInfo>,
+    bones_matched: u32,
+    bones_total: u32,
+    stats: ModelStats,
+    thumbnail: Option<String>,
+}
+
+/// The skeleton's model with the clips of `anim_files` retargeted by bone name.
+/// Its own takes are dropped, and its texture problems are not reported here
+/// (they show on the skeleton's own asset page).
+fn build_on_skeleton(
+    sk: &SkeletonSource,
+    anim_files: &[(String, PathBuf)],
+    cfg: &PipelineConfig,
+    out: &mut Out,
+    want_thumbnail: bool,
+) -> Result<OnSkeleton> {
+    let mut files: Vec<&hangar_core::FileEntry> = sk.files.iter().collect();
+    files.sort_by(|a, b| a.path.cmp(&b.path));
+    let images: Vec<String> = files.iter().filter(|f| paths::is_image(&f.path)).map(|f| f.path.clone()).collect();
+    let models: Vec<String> = files.iter().filter(|f| paths::is_model(&f.path)).map(|f| f.path.clone()).collect();
+    let fbx_count = models.iter().filter(|m| paths::extension(m) == "fbx").count();
+    let candidates: Vec<String> = models
+        .iter()
+        .filter(|m| {
+            fbx_count < 2
+                || paths::extension(m) != "fbx"
+                || import::fbx::probe(&sk.root.join(m), false).is_ok_and(|p| p.has_mesh)
+        })
+        .cloned()
+        .collect();
+    let Some(sel) = select_model(&candidates) else { bail!("the skeleton's asset has no model in its current version") };
+    if paths::extension(&sel.primary) != "fbx" {
+        bail!("the skeleton's model must be an FBX file (found {})", sel.primary);
+    }
+    let mut scene = import::import(&sk.root, &sel.primary, cfg, anim_files)?;
+    let (matched, total) = (scene.bones_matched, scene.bones_total);
+    let no_match = || anyhow!("no bone of the animation files matches the skeleton ({matched} of {total} node names found)");
+    let rig = scene.rig.as_mut().ok_or_else(no_match)?;
+    rig.clips.retain(|c| c.source.is_some());
+    if rig.clips.is_empty() {
+        return Err(no_match());
+    }
+    let rig = scene.rig.as_ref().expect("checked above");
+
+    let mut quiet = Vec::new();
+    let manual = load_material_config(&sk.root, &files, &mut quiet);
+    let index = ImageIndex::new(images);
+    let resolved = textures::resolve_materials(&scene.materials, &index, manual.as_ref(), &mut quiet);
+    let tex_size = SKELETON_TEXTURE_SIZE.min(cfg.max_texture_size);
+    let mut cache = ImageCache::new(tex_size);
+    let decoded = decode_all(&sk.root, &mut cache, &scene.materials, &resolved);
+    let (glb_mats, glb_images) = build_glb_materials(&scene.materials, &decoded, tex_size, &mut cache);
+    let bytes = glb::write_glb(&scene.meshes, &glb_mats, &glb_images, Some(rig));
+    let glb_size = bytes.len() as u64;
+    let glb_hash = out.push(Artifact::new(ArtifactRole::SkeletonGlb(sk.slug.clone()), "model/gltf-binary", bytes));
+
+    let thumbnail = want_thumbnail.then(|| {
+        let clip = &rig.clips[0];
+        let posed = pose::pose_meshes(&scene.meshes, rig, clip, clip.duration * 0.5);
+        let png = render_thumbnail(&posed, &scene.materials, &decoded, cfg.thumbnail_size);
+        out.push(Artifact::new(ArtifactRole::Thumbnail, "image/png", png))
+    });
+
+    let bounds = Aabb::of_meshes(&scene.meshes);
+    let stats = ModelStats {
+        meshes: scene.meshes.len() as u32,
+        materials: scene.meshes.iter().filter_map(|m| m.material).collect::<HashSet<_>>().len() as u32,
+        triangles: scene.meshes.iter().map(|m| m.triangle_count() as u64).sum(),
+        vertices: scene.meshes.iter().map(|m| m.positions.len() as u64).sum(),
+        bounds_min: if bounds.is_valid() { bounds.min } else { [0.0; 3] },
+        bounds_max: if bounds.is_valid() { bounds.max } else { [0.0; 3] },
+        has_uvs: scene.meshes.iter().any(|m| !m.uvs.is_empty()),
+        has_normals: scene.source_had_normals,
+        has_skin: scene.has_skin,
+        animations: rig.clips.len() as u32,
+    };
+    Ok(OnSkeleton {
+        glb_hash,
+        glb_size,
+        animations: rig.clips.iter().map(anim_info).collect(),
+        bones_matched: matched,
+        bones_total: total,
+        stats,
+        thumbnail,
+    })
+}
+
+/// Software-rendered PNG of `meshes` with the base color textures of `decoded`.
+fn render_thumbnail(
+    meshes: &[MeshPrim],
+    materials: &[Material],
+    decoded: &[Vec<(TextureSlot, Arc<Decoded>)>],
+    size: u32,
+) -> Vec<u8> {
     let thumb_textures: Vec<Option<image::RgbaImage>> = decoded
         .iter()
         .map(|list| {
@@ -441,41 +653,21 @@ fn build_model(
             }
         })
         .collect();
-    let thumb = raster::render_thumbnail(&levels[0].meshes, &thumb_mats, cfg.thumbnail_size);
-    manifest.thumbnail_hash = Some(out.push(Artifact::new(ArtifactRole::Thumbnail, "image/png", images::encode_png(&thumb))));
+    images::encode_png(&raster::render_thumbnail(meshes, &thumb_mats, size))
+}
 
-    // ---- stats
-    let lod0: &[MeshPrim] = &levels[0].meshes;
-    let bounds = Aabb::of_meshes(lod0);
-    let used_materials: HashSet<usize> = lod0.iter().filter_map(|m| m.material).collect();
-    manifest.stats = Some(ModelStats {
-        meshes: lod0.len() as u32,
-        materials: used_materials.len() as u32,
-        triangles: levels[0].triangles(),
-        vertices: levels[0].vertices(),
-        bounds_min: if bounds.is_valid() { bounds.min } else { [0.0; 3] },
-        bounds_max: if bounds.is_valid() { bounds.max } else { [0.0; 3] },
-        has_uvs: lod0.iter().any(|m| !m.uvs.is_empty()),
-        has_normals: scene.source_had_normals,
-        has_skin: scene.has_skin,
-        animations: scene.animations,
-    });
-    manifest.kind = Some(PreviewKind::Model);
-    manifest.primary_file = Some(sel.primary.clone());
-    manifest.importer = Some(scene.importer.to_string());
-    manifest.animations = scene
-        .rig
+/// Decodes every resolved texture once.
+fn decode_all(
+    root: &Path,
+    cache: &mut ImageCache,
+    materials: &[Material],
+    resolved: &[Vec<ResolvedTexture>],
+) -> Vec<Vec<(TextureSlot, Arc<Decoded>)>> {
+    materials
         .iter()
-        .flat_map(|r| &r.clips)
-        .map(|c| AnimationInfo {
-            name: c.name.clone(),
-            duration_secs: c.duration,
-            fps: c.fps,
-            frames: (c.duration * c.fps).round() as u32 + 1,
-            source: c.source.clone(),
-        })
-        .collect();
-    Ok(())
+        .zip(resolved)
+        .map(|(m, rs)| rs.iter().filter_map(|r| Some((r.slot, decode_resolved(root, cache, &m.name, r)?))).collect())
+        .collect()
 }
 
 /// Appends the skins of `.hangar/materials.json`; a manual skin replaces an
@@ -520,10 +712,10 @@ fn add_manual_skins(
     }
 }
 
-fn decode_resolved(input: &ProcessInput, cache: &mut ImageCache, mat: &str, r: &ResolvedTexture) -> Option<Arc<Decoded>> {
+fn decode_resolved(root: &Path, cache: &mut ImageCache, mat: &str, r: &ResolvedTexture) -> Option<Arc<Decoded>> {
     if let Some(p) = &r.path {
         if images::is_decodable_ext(&paths::extension(p)) {
-            return cache.get_file(input.root, p);
+            return cache.get_file(root, p);
         }
         return None;
     }
