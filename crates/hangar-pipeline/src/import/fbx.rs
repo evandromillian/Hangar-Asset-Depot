@@ -1,14 +1,14 @@
 //! FBX import through ufbx.
 
-use crate::scene::{Material, Scene, TexRef, TexSource, VertexDedup};
+use crate::scene::{AnimClip, Material, NodeChannel, Rig, Scene, SceneNode, Skin, TexRef, TexSource, VertexDedup};
 use anyhow::{anyhow, Result};
-use hangar_core::TextureSlot;
+use hangar_core::{paths, TextureSlot};
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
-pub fn load(path: &Path, base_dir: &str) -> Result<Scene> {
-    let opts = ufbx::LoadOpts {
+fn load_opts(geometry: bool) -> ufbx::LoadOpts<'static> {
+    ufbx::LoadOpts {
         target_axes: ufbx::CoordinateAxes {
             right: ufbx::CoordinateAxis::PositiveX,
             up: ufbx::CoordinateAxis::PositiveY,
@@ -20,15 +20,54 @@ pub fn load(path: &Path, base_dir: &str) -> Result<Scene> {
         load_external_files: false,
         ignore_missing_external_files: true,
         ignore_animation: false,
+        ignore_geometry: !geometry,
+        ignore_embedded: !geometry,
         evaluate_skinning: false,
+        // glTF can't express Maya's segment scale compensation: fold it into the
+        // local transforms so the exported hierarchy reproduces the world matrices.
+        inherit_mode_handling: ufbx::InheritModeHandling::Compensate,
         ..Default::default()
-    };
+    }
+}
+
+fn open(path: &Path, geometry: bool) -> Result<ufbx::SceneRoot> {
     let path_str = path.to_str().ok_or_else(|| anyhow!("non utf-8 path"))?;
-    let scene = ufbx::load_file(path_str, opts).map_err(|e| anyhow!("ufbx: {e:?}"))?;
+    ufbx::load_file(path_str, load_opts(geometry)).map_err(|e| anyhow!("ufbx: {e:?}"))
+}
+
+/// What an FBX file holds, for picking the preview model and animation files.
+#[derive(Debug, Clone, Copy)]
+pub struct FbxProbe {
+    pub has_mesh: bool,
+    /// Some take actually moves a node.
+    pub has_animation: bool,
+}
+
+/// Cheap look into an FBX (geometry is not loaded).
+pub fn probe(path: &Path) -> Result<FbxProbe> {
+    let scene = open(path, false)?;
+    let has_mesh = scene.nodes.iter().any(|n| n.mesh.is_some());
+    let has_animation = !bake_clips(&scene, None, &|n| Some(n.element.typed_id as usize), &mut vec![]).is_empty();
+    Ok(FbxProbe { has_mesh, has_animation })
+}
+
+/// Loads the model at `path`. `anim_files` are (version path, file) of other FBX
+/// files whose takes are added to the model's clips, matched by node name
+/// (animations exported separately, e.g. `Shark@Swim.fbx`).
+pub fn load(path: &Path, base_dir: &str, anim_files: &[(String, std::path::PathBuf)]) -> Result<Scene> {
+    let scene = open(path, true)?;
 
     let mut out = Scene { importer: "ufbx", ..Default::default() };
-    out.animations = scene.anim_stacks.len() as u32;
     out.has_skin = !scene.skin_deformers.is_empty();
+    let mut clips = bake_clips(&scene, None, &|n| Some(n.element.typed_id as usize), &mut out.warnings);
+    for (rel, file) in anim_files {
+        clips.extend(external_clips(&scene, rel, file, &mut out.warnings));
+    }
+    unique_names(&mut clips);
+    let mut rig = (!clips.is_empty()).then(|| Rig { nodes: rig_nodes(&scene), skins: vec![], clips });
+    out.animations = rig.as_ref().map_or(0, |r| r.clips.len() as u32);
+    // (skin deformer, mesh node) -> index into rig.skins
+    let mut skin_index: HashMap<(u32, u32), usize> = HashMap::new();
 
     // Materials: map ufbx element id -> our index.
     let mut mat_index: HashMap<u32, usize> = HashMap::new();
@@ -59,6 +98,16 @@ pub fn load(path: &Path, base_dir: &str) -> Result<Scene> {
             mesh.materials.iter().map(|m| mat_index.get(&m.element.element_id).copied()).collect()
         };
         let name = if node.element.name.is_empty() { mesh.element.name.to_string() } else { node.element.name.to_string() };
+        // Animated scenes: rigid meshes follow their node, skinned ones their skin.
+        let deformer = mesh.skin_deformers.iter().next().filter(|_| rig.is_some());
+        let skin = match (deformer, rig.as_mut()) {
+            (Some(d), Some(rig)) => Some(*skin_index.entry((d.element.typed_id, node.element.typed_id)).or_insert_with(|| {
+                rig.skins.push(convert_skin(d, node));
+                rig.skins.len() - 1
+            })),
+            _ => None,
+        };
+        let rigid_node = (rig.is_some() && skin.is_none()).then_some(node.element.typed_id as usize);
 
         let parts: Vec<(Option<usize>, Vec<u32>)> = if mesh.material_parts.is_empty() {
             vec![(materials.first().copied().flatten(), (0..mesh.faces.len() as u32).collect())]
@@ -94,12 +143,20 @@ pub fn load(path: &Path, base_dir: &str) -> Result<Scene> {
                             let u = mesh.vertex_uv[ix];
                             [u.x as f32, 1.0 - u.y as f32]
                         });
-                        dd.push([wp.x as f32, wp.y as f32, wp.z as f32], nn, uv);
+                        let influences = deformer.filter(|_| skin.is_some()).map(|d| {
+                            let v = mesh.vertex_indices[ix];
+                            let (j, w) = vertex_influences(d, v as usize);
+                            (v, j, w)
+                        });
+                        dd.push_skinned([wp.x as f32, wp.y as f32, wp.z as f32], nn, uv, influences);
                     }
                 }
             }
             if !dd.indices.is_empty() {
-                out.meshes.push(dd.into_prim(name.clone(), mat));
+                let mut prim = dd.into_prim(name.clone(), mat);
+                prim.node = rigid_node;
+                prim.skin = skin;
+                out.meshes.push(prim);
             }
         }
     }
@@ -107,7 +164,204 @@ pub fn load(path: &Path, base_dir: &str) -> Result<Scene> {
     if out.meshes.is_empty() {
         return Err(anyhow!("FBX contains no mesh geometry"));
     }
+    out.rig = rig;
     Ok(out)
+}
+
+fn mat4(m: &ufbx::Matrix) -> glam::Mat4 {
+    glam::Mat4::from_cols_array(&[
+        m.m00 as f32, m.m10 as f32, m.m20 as f32, 0.0,
+        m.m01 as f32, m.m11 as f32, m.m21 as f32, 0.0,
+        m.m02 as f32, m.m12 as f32, m.m22 as f32, 0.0,
+        m.m03 as f32, m.m13 as f32, m.m23 as f32, 1.0,
+    ])
+}
+
+/// Bakes every take of `scene` that actually moves something (exporters write
+/// an empty "Take 001" into almost every FBX). `target` maps a node of `scene`
+/// to the rig node it drives; unmapped nodes are dropped. `source` is the
+/// version path of a separate animation file.
+fn bake_clips(
+    scene: &ufbx::Scene,
+    source: Option<&str>,
+    target: &dyn Fn(&ufbx::Node) -> Option<usize>,
+    warnings: &mut Vec<String>,
+) -> Vec<AnimClip> {
+    let fps = match scene.settings.frames_per_second {
+        f if f > 0.0 => f.min(120.0),
+        _ => 30.0,
+    };
+    let mut clips = Vec::new();
+    for (i, stack) in scene.anim_stacks.iter().enumerate() {
+        let opts = ufbx::BakeOpts { resample_rate: fps, minimum_sample_rate: fps, ..Default::default() };
+        let baked = match ufbx::bake_anim(scene, &stack.anim, opts) {
+            Ok(b) => b,
+            Err(e) => {
+                warnings.push(format!("animation '{}' skipped: {e:?}", stack.element.name));
+                continue;
+            }
+        };
+        let start = baked.playback_time_begin;
+        let rel = |t: f64| (t - start).max(0.0) as f32;
+        let v3 = |v: &ufbx::Vec3| [v.x as f32, v.y as f32, v.z as f32];
+        let channels: Vec<NodeChannel> = baked
+            .nodes
+            .iter()
+            .filter_map(|b| Some((b, target(scene.nodes.get(b.typed_id as usize)?)?)))
+            .map(|(b, node)| NodeChannel {
+                node,
+                translation: b.translation_keys.iter().map(|k| (rel(k.time), v3(&k.value))).collect(),
+                rotation: b
+                    .rotation_keys
+                    .iter()
+                    .map(|k| (rel(k.time), [k.value.x as f32, k.value.y as f32, k.value.z as f32, k.value.w as f32]))
+                    .collect(),
+                scale: b.scale_keys.iter().map(|k| (rel(k.time), v3(&k.value))).collect(),
+            })
+            .collect();
+        if !channels.iter().any(channel_moves) {
+            continue;
+        }
+        let last_key = channels
+            .iter()
+            .flat_map(|c| {
+                let t = c.translation.iter().map(|k| k.0);
+                t.chain(c.rotation.iter().map(|k| k.0)).chain(c.scale.iter().map(|k| k.0))
+            })
+            .fold(0.0f32, f32::max);
+        let duration = (baked.playback_duration as f32).max(last_key);
+        if duration <= 0.0 {
+            continue;
+        }
+        let name = clip_name(&stack.element.name, source, i);
+        clips.push(AnimClip { name, duration, fps: fps as f32, channels, source: source.map(str::to_string) });
+    }
+    clips
+}
+
+/// Takes of a separate animation file, retargeted by node name onto `model`.
+fn external_clips(model: &ufbx::Scene, rel: &str, file: &Path, warnings: &mut Vec<String>) -> Vec<AnimClip> {
+    let scene = match open(file, false) {
+        Ok(s) => s,
+        Err(e) => {
+            warnings.push(format!("animation file {rel} skipped: {e:#}"));
+            return vec![];
+        }
+    };
+    let mut by_name: HashMap<String, usize> = HashMap::new();
+    for n in &model.nodes {
+        by_name.entry(node_key(&n.element.name)).or_insert(n.element.typed_id as usize);
+    }
+    let clips = bake_clips(&scene, Some(rel), &|n| by_name.get(&node_key(&n.element.name)).copied(), warnings);
+    if clips.is_empty() {
+        warnings.push(format!("animation file {rel}: no animated node matches the model's nodes"));
+    }
+    clips
+}
+
+/// Node name for matching across files: case-insensitive, without namespaces
+/// (`mixamorig:Hips` ↔ `Hips`).
+fn node_key(name: &str) -> String {
+    name.rsplit(':').next().unwrap_or(name).trim().to_lowercase()
+}
+
+/// Display name of a take. Generic exporter names are replaced by the file
+/// name (`Shark@Swim.fbx` → "Swim"); Blender's `Armature|Swim` keeps "Swim".
+fn clip_name(take: &str, source: Option<&str>, index: usize) -> String {
+    let take = take.rsplit('|').next().unwrap_or(take).trim();
+    let generic = take.is_empty()
+        || matches!(
+            take.to_lowercase().as_str(),
+            "take 001" | "take 01" | "take001" | "take 1" | "mixamo.com" | "unreal take" | "default take" | "animation" | "anim" | "scene"
+        );
+    match (generic, source) {
+        (false, _) => take.to_string(),
+        (true, Some(src)) => {
+            let stem = paths::stem(src);
+            stem.rsplit('@').next().unwrap_or(stem).trim().to_string()
+        }
+        (true, None) if take.is_empty() => format!("Animação {}", index + 1),
+        (true, None) => take.to_string(),
+    }
+}
+
+/// Clip names must be unique for the dropdown: repeated ones get " (2)", " (3)"...
+fn unique_names(clips: &mut [AnimClip]) {
+    for i in 1..clips.len() {
+        let base = clips[i].name.clone();
+        let mut n = 1;
+        while clips[..i].iter().any(|c| c.name.eq_ignore_ascii_case(&clips[i].name)) {
+            n += 1;
+            clips[i].name = format!("{base} ({n})");
+        }
+    }
+}
+
+fn rig_nodes(scene: &ufbx::Scene) -> Vec<SceneNode> {
+    scene
+        .nodes
+        .iter()
+        .map(|n| {
+            let t = &n.local_transform;
+            SceneNode {
+                name: n.element.name.to_string(),
+                parent: n.parent.as_ref().map(|p| p.element.typed_id as usize),
+                translation: [t.translation.x as f32, t.translation.y as f32, t.translation.z as f32],
+                rotation: [t.rotation.x as f32, t.rotation.y as f32, t.rotation.z as f32, t.rotation.w as f32],
+                scale: [t.scale.x as f32, t.scale.y as f32, t.scale.z as f32],
+                world: mat4(&n.node_to_world),
+                world_inv: mat4(&ufbx::matrix_invert(&n.node_to_world)),
+            }
+        })
+        .collect()
+}
+
+/// Whether any key differs from the previous one (a constant pose is not an animation).
+fn channel_moves(c: &NodeChannel) -> bool {
+    fn varies<const N: usize>(keys: &[(f32, [f32; N])]) -> bool {
+        keys.windows(2).any(|w| w[0].1.iter().zip(&w[1].1).any(|(a, b)| (a - b).abs() > 1e-5))
+    }
+    varies(&c.translation) || varies(&c.rotation) || varies(&c.scale)
+}
+
+/// glTF skin for `deformer` as used by the mesh on `node`. Vertices are exported
+/// in world space (rest pose), so each inverse bind matrix maps world space to
+/// the bone at bind time.
+fn convert_skin(deformer: &ufbx::SkinDeformer, node: &ufbx::Node) -> Skin {
+    let world_to_geometry = mat4(&ufbx::matrix_invert(&node.geometry_to_world));
+    let mut joints = Vec::new();
+    let mut inverse_bind = Vec::new();
+    for cluster in deformer.clusters.iter() {
+        // A cluster without a bone still needs a joint slot; the root is static.
+        joints.push(cluster.bone_node.as_ref().map_or(0, |b| b.element.typed_id as usize));
+        inverse_bind.push(mat4(&cluster.geometry_to_bone) * world_to_geometry);
+    }
+    Skin { name: deformer.element.name.to_string(), joints, inverse_bind }
+}
+
+/// The four strongest influences of a control point, normalised.
+fn vertex_influences(deformer: &ufbx::SkinDeformer, vertex: usize) -> ([u16; 4], [f32; 4]) {
+    let mut all: Vec<(u16, f32)> = deformer
+        .vertices
+        .get(vertex)
+        .map(|v| {
+            let range = v.weight_begin as usize..(v.weight_begin + v.num_weights) as usize;
+            range.filter_map(|i| deformer.weights.get(i)).map(|w| (w.cluster_index as u16, w.weight as f32)).collect()
+        })
+        .unwrap_or_default();
+    all.sort_by(|a, b| b.1.total_cmp(&a.1));
+    all.truncate(4);
+    let sum: f32 = all.iter().map(|w| w.1).sum();
+    if sum <= 0.0 {
+        return ([0; 4], [1.0, 0.0, 0.0, 0.0]);
+    }
+    let mut joints = [0u16; 4];
+    let mut weights = [0f32; 4];
+    for (i, (j, w)) in all.into_iter().enumerate() {
+        joints[i] = j;
+        weights[i] = w / sum;
+    }
+    (joints, weights)
 }
 
 fn det3(m: &ufbx::Matrix) -> f64 {

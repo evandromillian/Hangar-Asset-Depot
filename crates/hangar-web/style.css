@@ -340,6 +340,15 @@ select { appearance: none; background-image: linear-gradient(45deg, transparent 
   font: 12px var(--font); cursor: pointer;
 }
 .toggle:hover { color: var(--text); border-color: #46505a; }
+.toggle:disabled { opacity: 0.4; cursor: default; }
+
+/* Animation bar (above the LOD / skin toolbar) */
+.anim-bar .tool-group { flex-wrap: nowrap; }
+.anim-btn { min-width: 32px; text-align: center; font-family: var(--font-mono); }
+.anim-select { height: 30px; min-width: 180px; max-width: 280px; font-size: 12px; padding-top: 0; padding-bottom: 0; }
+.anim-rate { gap: 6px; }
+.anim-rate input { width: 64px; height: 30px; font: 12px var(--font-mono); padding: 0 6px; }
+.anim-time { font-size: 11.5px; color: var(--text-2); white-space: nowrap; }
 .toggle.on { color: var(--accent-ink); background: var(--accent); border-color: var(--accent); font-weight: 600; }
 .stat-strip {
   display: flex; gap: 18px; flex-wrap: wrap; padding: 8px 14px; border-top: 1px solid var(--line);

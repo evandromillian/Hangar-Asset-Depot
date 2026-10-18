@@ -259,7 +259,7 @@ mod tests {
             normals: vec![],
             uvs: vec![],
             indices: vec![0, 1, 2, 0, 2, 3],
-            lod: None,
+            ..Default::default()
         };
         let mats = [ThumbMaterial { base_color: [1.0, 0.0, 0.0, 1.0], texture: None, alpha_test: false }];
         let img = render_thumbnail(&[m], &mats, 64);

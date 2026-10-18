@@ -4,6 +4,7 @@
 //! bytes and sends them in [`ViewerCommand`]s. GLBs are written into an
 //! in-memory asset source (`mem://`) and loaded with the regular glTF loader.
 
+mod animation;
 mod camera;
 mod model;
 mod variants;
@@ -23,7 +24,8 @@ pub enum ViewerCommand {
     /// Replace the displayed model. `key` must be unique per content (the GLB
     /// hash); `asset` identifies the logical asset: the camera is only
     /// re-framed when it changes, so switching LOD/version keeps the view.
-    LoadModel { key: String, asset: String, bytes: Arc<Vec<u8>> },
+    /// `animations` lists the GLB's clips in order (from the manifest).
+    LoadModel { key: String, asset: String, bytes: Arc<Vec<u8>>, animations: Vec<ClipInfo> },
     /// Remove the model.
     Clear,
     /// Override textures by material name (a skin / texture variant), and hide
@@ -36,6 +38,20 @@ pub enum ViewerCommand {
     SetGrid(bool),
     /// Frame the model again.
     ResetCamera,
+    /// Play clip `n` (looping), or show the rest pose with `None`.
+    SelectAnimation(Option<usize>),
+    SetAnimationPaused(bool),
+    /// Move the current clip by whole frames (pauses it).
+    StepAnimation(i32),
+    /// Playback rate; negative plays backwards.
+    SetAnimationSpeed(f32),
+}
+
+/// Timing of one animation clip of the loaded GLB.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ClipInfo {
+    pub duration: f32,
+    pub fps: f32,
 }
 
 #[derive(Clone)]
@@ -69,6 +85,8 @@ pub struct ViewerDraft {
 #[derive(Message, Clone, Debug, PartialEq)]
 pub enum ViewerEvent {
     Loaded { key: String, meshes: usize, triangles: usize },
+    /// Playback position of the selected clip (throttled while playing).
+    AnimationTime { clip: usize, seconds: f32 },
     Error(String),
 }
 
@@ -135,6 +153,7 @@ pub fn build_app(
     .init_resource::<model::ModelState>()
     .init_resource::<variants::VariantState>()
     .init_resource::<wireframe::WireCache>()
+    .init_resource::<animation::AnimState>()
     .import_message_from_leptos(commands_rx)
     .export_message_to_leptos(events_tx)
     .add_systems(Startup, setup_scene)
@@ -143,6 +162,7 @@ pub fn build_app(
         Update,
         (
             model::handle_commands,
+            animation::handle_animation_commands,
             variants::handle_variant_commands,
             model::watch_load_failures,
             camera::orbit_input,
@@ -153,7 +173,15 @@ pub fn build_app(
     )
     .add_systems(
         Last,
-        (model::finish_model_setup, wireframe::sync_wireframe, variants::apply_pending_variant).chain(),
+        (
+            model::finish_model_setup,
+            animation::attach_player,
+            animation::apply_animation,
+            animation::report_time,
+            wireframe::sync_wireframe,
+            variants::apply_pending_variant,
+        )
+            .chain(),
     );
     app
 }

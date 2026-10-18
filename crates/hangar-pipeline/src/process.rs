@@ -10,7 +10,7 @@ use crate::variants::{self, UsedTexture};
 use crate::{import, Artifact, ArtifactRole, PipelineConfig, ProcessInput, ProcessOutput};
 use anyhow::{anyhow, Result};
 use hangar_core::{
-    paths, LodInfo, MaterialInfo, MaterialTexture, ModelStats, PreviewKind, PreviewManifest, TextureInfo,
+    paths, AnimationInfo, LodInfo, MaterialInfo, MaterialTexture, ModelStats, PreviewKind, PreviewManifest, TextureInfo,
     MaterialConfig, TextureOverride, TextureSlot, VariantInfo, MATERIAL_CONFIG_PATH, PIPELINE_VERSION,
 };
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -82,8 +82,37 @@ pub fn run(input: &ProcessInput, cfg: &PipelineConfig) -> Result<ProcessOutput> 
     }
 
     // ---- model ------------------------------------------------------------
+    // With several FBX files, look inside them: animation-only files can't be the
+    // preview model, and files whose takes move feed the model's animations.
+    let fbx_count = models.iter().filter(|m| paths::extension(m) == "fbx").count();
+    let probes: HashMap<&String, import::fbx::FbxProbe> = if fbx_count > 1 {
+        models
+            .iter()
+            .filter(|m| paths::extension(m) == "fbx")
+            .filter_map(|m| import::fbx::probe(&input.root.join(m)).ok().map(|p| (m, p)))
+            .collect()
+    } else {
+        HashMap::new()
+    };
+    let candidates: Vec<String> = models.iter().filter(|m| probes.get(m).is_none_or(|p| p.has_mesh)).cloned().collect();
     let mut model_done = false;
-    if let Some(sel) = select_model(&models) {
+    if let Some(mut sel) = select_model(&candidates) {
+        let anim_files: Vec<String> = if paths::extension(&sel.primary) == "fbx" {
+            models
+                .iter()
+                .filter(|m| **m != sel.primary && !sel.lod_files.iter().any(|(_, p)| p == *m))
+                .filter(|m| probes.get(m).is_some_and(|p| p.has_animation))
+                .cloned()
+                .collect()
+        } else {
+            vec![]
+        };
+        // Models that are neither previewed nor animation sources.
+        sel.ignored = models
+            .iter()
+            .filter(|m| **m != sel.primary && !sel.lod_files.iter().any(|(_, p)| p == *m) && !anim_files.contains(m))
+            .cloned()
+            .collect();
         if !sel.ignored.is_empty() {
             warnings.push(format!(
                 "{} other model file(s) not previewed: {}",
@@ -91,7 +120,13 @@ pub fn run(input: &ProcessInput, cfg: &PipelineConfig) -> Result<ProcessOutput> 
                 sel.ignored.iter().take(5).cloned().collect::<Vec<_>>().join(", ")
             ));
         }
-        let ctx = ModelInputs { sel: &sel, images: &images, preview_by_path: &preview_by_path, manual: manual.as_ref() };
+        let ctx = ModelInputs {
+            sel: &sel,
+            images: &images,
+            preview_by_path: &preview_by_path,
+            manual: manual.as_ref(),
+            anim_files: &anim_files,
+        };
         match build_model(input, cfg, &ctx, &mut cache, &mut out, &mut manifest, &mut warnings) {
             Ok(()) => model_done = true,
             Err(e) => {
@@ -158,7 +193,11 @@ pub fn select_model(models: &[String]) -> Option<ModelSelection> {
         }
     }
     let mut best: Vec<&String> = models.iter().collect();
-    best.sort_by_key(|m| (ext_priority(&paths::extension(m)), m.matches('/').count(), m.to_ascii_lowercase()));
+    // `Model@Clip.fbx` is the usual name of a separate animation file: never the model if avoidable.
+    best.sort_by_key(|m| {
+        let anim_name = paths::stem(m).contains('@');
+        (ext_priority(&paths::extension(m)), anim_name, m.matches('/').count(), m.to_ascii_lowercase())
+    });
     let primary_candidate = best[0].clone();
     // If the best candidate belongs to a LOD group of >= 2 files, use the group.
     let group = groups.values().find(|g| g.len() >= 2 && g.iter().any(|(_, p)| *p == primary_candidate)).cloned();
@@ -229,6 +268,8 @@ struct ModelInputs<'a> {
     images: &'a [String],
     preview_by_path: &'a HashMap<String, String>,
     manual: Option<&'a MaterialConfig>,
+    /// Other FBX files whose takes animate the primary model.
+    anim_files: &'a [String],
 }
 
 fn build_model(
@@ -240,8 +281,8 @@ fn build_model(
     manifest: &mut PreviewManifest,
     warnings: &mut Vec<String>,
 ) -> Result<()> {
-    let ModelInputs { sel, images, preview_by_path, manual } = *ctx;
-    let scene: Scene = import::import(input.root, &sel.primary, cfg)?;
+    let ModelInputs { sel, images, preview_by_path, manual, anim_files } = *ctx;
+    let scene: Scene = import::import(input.root, &sel.primary, cfg, anim_files)?;
     warnings.extend(scene.warnings.iter().cloned());
     let mut materials = scene.materials.clone();
 
@@ -249,7 +290,7 @@ fn build_model(
     let mut levels: Vec<LodLevel> = if sel.lod_files.len() >= 2 {
         let mut lv = vec![LodLevel { level: 0, source: hangar_core::LodSource::Authored, meshes: scene.meshes.clone(), ratio: 1.0 }];
         for (_, path) in sel.lod_files.iter().skip(1) {
-            match import::import(input.root, path, cfg) {
+            match import::import(input.root, path, cfg, &[]) {
                 Ok(s) => {
                     let remap = merge_materials(&mut materials, &s.materials);
                     let meshes = s
@@ -257,6 +298,8 @@ fn build_model(
                         .into_iter()
                         .map(|mut m| {
                             m.material = m.material.and_then(|i| remap.get(i).copied());
+                            // Only the primary file's rig is exported; other LOD files stay static.
+                            (m.node, m.skin) = (None, None);
                             m
                         })
                         .collect();
@@ -354,7 +397,7 @@ fn build_model(
     for level in &levels {
         let tex_size = (cfg.max_texture_size >> level.level).max(256).min(cfg.max_texture_size);
         let (glb_mats, glb_images) = build_glb_materials(&materials, &decoded, tex_size, cache);
-        let bytes = glb::write_glb(&level.meshes, &glb_mats, &glb_images);
+        let bytes = glb::write_glb(&level.meshes, &glb_mats, &glb_images, scene.rig.as_ref());
         let size = bytes.len() as u64;
         let h = out.push(Artifact::new(ArtifactRole::LodGlb(level.level), "model/gltf-binary", bytes));
         manifest.lods.push(LodInfo {
@@ -420,6 +463,18 @@ fn build_model(
     manifest.kind = Some(PreviewKind::Model);
     manifest.primary_file = Some(sel.primary.clone());
     manifest.importer = Some(scene.importer.to_string());
+    manifest.animations = scene
+        .rig
+        .iter()
+        .flat_map(|r| &r.clips)
+        .map(|c| AnimationInfo {
+            name: c.name.clone(),
+            duration_secs: c.duration,
+            fps: c.fps,
+            frames: (c.duration * c.fps).round() as u32 + 1,
+            source: c.source.clone(),
+        })
+        .collect();
     Ok(())
 }
 
@@ -594,5 +649,9 @@ mod tests {
         assert_eq!(sel.lod_files.iter().map(|(l, _)| *l).collect::<Vec<_>>(), vec![0, 1, 2]);
         assert_eq!(sel.ignored, vec!["Tank.blend".to_string()]);
         assert!(select_model(&[]).is_none());
+
+        // Separate animation files (`Model@Clip`) lose to the model itself.
+        let sel = select_model(&s(&["Shark@Attack.fbx", "Shark.fbx", "Shark@Swim.fbx"])).unwrap();
+        assert_eq!(sel.primary, "Shark.fbx");
     }
 }

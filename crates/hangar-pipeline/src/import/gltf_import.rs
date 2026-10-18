@@ -134,6 +134,7 @@ pub fn load(path: &Path, base_dir: &str, importer: &'static str) -> Result<Scene
                 uvs: if uvs.len() == positions.len() { uvs } else { vec![] },
                 positions,
                 indices,
+                ..Default::default()
             });
         }
     }

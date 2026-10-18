@@ -30,6 +30,9 @@ pub struct PreviewManifest {
     pub materials: Vec<MaterialInfo>,
     #[serde(default)]
     pub textures: Vec<TextureInfo>,
+    /// Animation clips baked into every LOD GLB, in GLB order.
+    #[serde(default)]
+    pub animations: Vec<AnimationInfo>,
     pub stats: Option<ModelStats>,
     pub audio: Option<AudioInfo>,
     /// PNG thumbnail (software rendered for models, downscaled for images).
@@ -104,6 +107,20 @@ pub struct TextureInfo {
     /// Guessed slot from the file name (`_D`, `_N`, `_ORM`...).
     pub slot: Option<TextureSlot>,
     pub preview_hash: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AnimationInfo {
+    /// Take / clip name from the source file.
+    pub name: String,
+    pub duration_secs: f32,
+    /// Sampling rate of the baked keys (the source frame rate).
+    pub fps: f32,
+    /// Number of frames, the last one included.
+    pub frames: u32,
+    /// Version path of the separate animation file it came from (None: the model file).
+    #[serde(default)]
+    pub source: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]

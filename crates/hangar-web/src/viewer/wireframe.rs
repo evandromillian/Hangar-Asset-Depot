@@ -4,6 +4,7 @@
 use super::ViewerSettings;
 use super::model::ModelState;
 use bevy::asset::RenderAssetUsages;
+use bevy::mesh::skinning::SkinnedMesh;
 use bevy::mesh::{Indices, PrimitiveTopology, VertexAttributeValues};
 use bevy::prelude::*;
 use std::collections::{HashMap, HashSet};
@@ -61,6 +62,12 @@ fn edge_mesh(mesh: &Mesh) -> Option<Mesh> {
     };
     let mut lines = Mesh::new(PrimitiveTopology::LineList, RenderAssetUsages::RENDER_WORLD);
     lines.insert_attribute(Mesh::ATTRIBUTE_POSITION, lifted);
+    // Skinned sources: the overlay is skinned with the same joints so it follows the pose.
+    for attr in [Mesh::ATTRIBUTE_JOINT_INDEX, Mesh::ATTRIBUTE_JOINT_WEIGHT] {
+        if let Some(values) = mesh.attribute(attr) {
+            lines.insert_attribute(attr, values.clone());
+        }
+    }
     lines.insert_indices(Indices::U32(indices));
     Some(lines)
 }
@@ -72,7 +79,7 @@ pub fn sync_wireframe(
     mut cache: ResMut<WireCache>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    mesh_q: Query<&Mesh3d, Without<WireOverlay>>,
+    mesh_q: Query<(&Mesh3d, Option<&SkinnedMesh>), Without<WireOverlay>>,
     mut overlays: Query<&mut Visibility, With<WireOverlay>>,
 ) {
     if settings.wireframe && cache.built_for != Some(model.generation) && !model.meshes.is_empty() {
@@ -87,7 +94,7 @@ pub fn sync_wireframe(
             })
             .clone();
         for &e in &model.meshes {
-            let Ok(mesh3d) = mesh_q.get(e) else { continue };
+            let Ok((mesh3d, skinned)) = mesh_q.get(e) else { continue };
             let id = mesh3d.0.id();
             let handle = match cache.lines.get(&id) {
                 Some(h) => h.clone(),
@@ -99,12 +106,12 @@ pub fn sync_wireframe(
                     h
                 }
             };
-            commands.entity(e).with_child((
-                Mesh3d(handle),
-                MeshMaterial3d(material.clone()),
-                Transform::IDENTITY,
-                WireOverlay,
-            ));
+            let mut overlay = commands.spawn((Mesh3d(handle), MeshMaterial3d(material.clone()), Transform::IDENTITY, WireOverlay));
+            if let Some(skin) = skinned {
+                overlay.insert(skin.clone());
+            }
+            let overlay = overlay.id();
+            commands.entity(e).add_child(overlay);
         }
         cache.built_for = Some(model.generation);
     }

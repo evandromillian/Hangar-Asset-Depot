@@ -11,13 +11,15 @@ use anyhow::{anyhow, Result};
 use hangar_core::paths;
 use std::path::Path;
 
-/// Import a version file (`rel` relative to `root`).
-pub fn import(root: &Path, rel: &str, cfg: &PipelineConfig) -> Result<Scene> {
+/// Import a version file (`rel` relative to `root`). `anim_files` are other
+/// version files holding animations for this model (FBX primaries only).
+pub fn import(root: &Path, rel: &str, cfg: &PipelineConfig, anim_files: &[String]) -> Result<Scene> {
     let path = root.join(rel);
     let base_dir = paths::parent(rel).to_string();
     let ext = paths::extension(rel);
+    let anims: Vec<(String, std::path::PathBuf)> = anim_files.iter().map(|a| (a.clone(), root.join(a))).collect();
     let native = match ext.as_str() {
-        "fbx" => Some(fbx::load(&path, &base_dir)),
+        "fbx" => Some(fbx::load(&path, &base_dir, &anims)),
         "glb" | "gltf" => Some(gltf_import::load(&path, &base_dir, "gltf")),
         "obj" => Some(obj::load(&path, &base_dir)),
         _ => None,
@@ -42,6 +44,12 @@ pub fn import(root: &Path, rel: &str, cfg: &PipelineConfig) -> Result<Scene> {
             }
         }
     };
+    if ext != "fbx" && !anim_files.is_empty() {
+        scene.warnings.push(format!(
+            "separate animation files need an FBX model; not applied: {}",
+            anim_files.join(", ")
+        ));
+    }
     for m in &mut scene.meshes {
         ensure_normals(m);
     }

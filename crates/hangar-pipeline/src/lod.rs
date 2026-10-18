@@ -146,10 +146,13 @@ pub fn compact(m: &MeshPrim, indices: &[u32]) -> MeshPrim {
         name: m.name.clone(),
         material: m.material,
         lod: m.lod,
+        node: m.node,
+        skin: m.skin,
         ..Default::default()
     };
     let has_n = m.normals.len() == m.positions.len();
     let has_uv = m.uvs.len() == m.positions.len();
+    let has_skin = m.joints.len() == m.positions.len() && m.weights.len() == m.positions.len();
     for &i in indices {
         let i = i as usize;
         if remap[i] == u32::MAX {
@@ -160,6 +163,10 @@ pub fn compact(m: &MeshPrim, indices: &[u32]) -> MeshPrim {
             }
             if has_uv {
                 out.uvs.push(m.uvs[i]);
+            }
+            if has_skin {
+                out.joints.push(m.joints[i]);
+                out.weights.push(m.weights[i]);
             }
         }
         out.indices.push(remap[i]);

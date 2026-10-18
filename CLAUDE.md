@@ -113,6 +113,12 @@ prepared statements. Add `?sslmode=require`.
   (`hangar_core::MaterialConfig`): base slot assignments override automatic resolution, skins become
   `detected_by: "manual"` variants. The web "Materiais" tab edits it and commits a new version; the
   viewer's live preview must mirror the GLB export's factor rules (`viewer/variants.rs`).
+- Meshes (`MeshPrim`) are always world-space rest pose. An animated FBX additionally yields a
+  `scene::Rig` (hierarchy, skins, baked clips); only `glb::write_glb` uses it, moving rigid parts into
+  their node's space and writing everything under a single root node (Bevy's animation root).
+  The manifest's `animations` must stay in GLB clip order — the viewer loads `#AnimationN` by index.
+  Other FBX files of the version whose takes move are animation sources for an FBX primary
+  (`fbx::probe` classifies them; clips are retargeted by node name in `fbx::external_clips`).
 - Recoverable problems go to `manifest.warnings`, not errors. Fail only when nothing can be previewed.
 - Heuristics (texture resolution, slot tokens, variant detection, LOD suffixes) are unit-tested in
   their modules; extend those tests when changing them.
@@ -145,8 +151,8 @@ prepared statements. Add `?sslmode=require`.
 
 ## Known gaps / next steps
 
-- No DDS/PSD/EXR texture previews; animation/skinning is counted but not previewed; GLB export
-  flattens the node hierarchy.
+- No DDS/PSD/EXR texture previews. Animation is exported for FBX only (node + skeletal, no morph
+  targets); glTF/OBJ sources are still flattened, and their animations are not exported.
 - Blender fallback is implemented but was never run against a real Blender in CI.
 - The S3 storage backend is compiled in but only the `fs` backend has been exercised end-to-end.
 - Sessions are in memory by default (`--features redis-sessions` for Redis); blob downloads by hash

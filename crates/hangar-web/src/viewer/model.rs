@@ -39,7 +39,7 @@ pub struct ModelState {
     pub generation: u64,
 }
 
-fn mem_path(key: &str) -> String {
+pub fn mem_path(key: &str) -> String {
     format!("{key}.glb")
 }
 
@@ -55,7 +55,7 @@ pub fn handle_commands(
 ) {
     for cmd in reader.read() {
         match cmd {
-            ViewerCommand::LoadModel { key, asset, bytes } => {
+            ViewerCommand::LoadModel { key, asset, bytes, .. } => {
                 if state.key.as_deref() == Some(key.as_str()) && state.root.is_some() {
                     continue;
                 }
@@ -104,7 +104,12 @@ pub fn handle_commands(
                     orbit.frame(min, max, fov);
                 }
             }
-            ViewerCommand::ApplyVariant { .. } | ViewerCommand::ResetVariant => {}
+            ViewerCommand::ApplyVariant { .. }
+            | ViewerCommand::ResetVariant
+            | ViewerCommand::SelectAnimation(_)
+            | ViewerCommand::SetAnimationPaused(_)
+            | ViewerCommand::StepAnimation(_)
+            | ViewerCommand::SetAnimationSpeed(_) => {}
         }
     }
 }

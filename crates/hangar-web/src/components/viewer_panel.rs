@@ -2,7 +2,7 @@
 
 use crate::api;
 use crate::util::{fmt_bytes, fmt_compact, fmt_int};
-use crate::viewer::{self, CANVAS_ID, VariantTexture, ViewerCommand, ViewerDraft, ViewerEvent};
+use crate::viewer::{self, CANVAS_ID, ClipInfo, VariantTexture, ViewerCommand, ViewerDraft, ViewerEvent};
 use hangar_core::{LodSource, VersionDto};
 use leptos::prelude::*;
 use leptos::task::spawn_local;
@@ -82,6 +82,11 @@ pub fn ViewerPanel(
     let loaded_tris = RwSignal::new(None::<usize>);
     let request_seq = StoredValue::new(0u64);
     let variant_seq = StoredValue::new(0u64);
+    // Animation playback (clip index into `preview.animations`).
+    let anim_sel = RwSignal::new(None::<usize>);
+    let anim_paused = RwSignal::new(false);
+    let anim_speed = RwSignal::new(1.0f32);
+    let anim_time = RwSignal::new(0.0f32);
 
     let preview = Memo::new(move |_| version.get().and_then(|v| v.preview));
 
@@ -99,6 +104,18 @@ pub fn ViewerPanel(
         }
     });
 
+    // New version: keep the selected clip if it still exists, else play the first.
+    Effect::new(move |_| {
+        let Some(p) = preview.get() else { return };
+        let n = p.animations.len();
+        let current = anim_sel.get_untracked();
+        if n == 0 {
+            anim_sel.set(None);
+        } else if current.is_none_or(|i| i >= n) {
+            anim_sel.set(Some(0));
+        }
+    });
+
     // Load the GLB of the selected LOD.
     let tx = cmd_tx.clone();
     Effect::new(move |_| {
@@ -110,6 +127,8 @@ pub fn ViewerPanel(
             return;
         };
         let asset = asset_id.get_untracked().to_string();
+        let animations: Vec<ClipInfo> =
+            p.animations.iter().map(|a| ClipInfo { duration: a.duration_secs, fps: a.fps }).collect();
         let seq = request_seq.get_value() + 1;
         request_seq.set_value(seq);
         loading.set(true);
@@ -118,7 +137,7 @@ pub fn ViewerPanel(
             match fetch_blob(cache, info.glb_hash.clone()).await {
                 Ok(bytes) => {
                     if request_seq.get_value() == seq {
-                        cmd_tx.send(ViewerCommand::LoadModel { key: info.glb_hash, asset, bytes }).ok();
+                        cmd_tx.send(ViewerCommand::LoadModel { key: info.glb_hash, asset, bytes, animations }).ok();
                     }
                 }
                 Err(e) => {
@@ -185,6 +204,19 @@ pub fn ViewerPanel(
     Effect::new(move |_| {
         tx.send(ViewerCommand::SetGrid(grid.get())).ok();
     });
+    let tx = cmd_tx.clone();
+    Effect::new(move |_| {
+        anim_time.set(0.0);
+        tx.send(ViewerCommand::SelectAnimation(anim_sel.get())).ok();
+    });
+    let tx = cmd_tx.clone();
+    Effect::new(move |_| {
+        tx.send(ViewerCommand::SetAnimationPaused(anim_paused.get())).ok();
+    });
+    let tx = cmd_tx.clone();
+    Effect::new(move |_| {
+        tx.send(ViewerCommand::SetAnimationSpeed(anim_speed.get())).ok();
+    });
 
     Effect::new(move |_| match evt_rx.get() {
         Some(ViewerEvent::Loaded { triangles, .. }) => {
@@ -195,7 +227,25 @@ pub fn ViewerPanel(
             loading.set(false);
             error.set(Some(e));
         }
-        None => {}
+        Some(ViewerEvent::AnimationTime { clip, seconds }) if anim_sel.get_untracked() == Some(clip) => {
+            anim_time.set(seconds);
+        }
+        Some(ViewerEvent::AnimationTime { .. }) | None => {}
+    });
+
+    let clips = Memo::new(move |_| preview.get().map(|p| p.animations).unwrap_or_default());
+    let current_clip = move || anim_sel.get().and_then(|i| clips.with(|c| c.get(i).cloned()));
+    let cycle = move |delta: isize| {
+        let n = clips.with(|c| c.len()) as isize;
+        if n > 0 {
+            let next = anim_sel.get_untracked().map_or(0, |i| (i as isize + delta).rem_euclid(n));
+            anim_sel.set(Some(next as usize));
+        }
+    };
+    let tx = cmd_tx.clone();
+    let step = Callback::new(move |frames: i32| {
+        anim_paused.set(true);
+        tx.send(ViewerCommand::StepAnimation(frames)).ok();
     });
 
     let current_lod = move || {
@@ -218,6 +268,96 @@ pub fn ViewerPanel(
                 {move || error.get().map(|e| view! { <div class="viewer-error">{e}</div> })}
                 <div class="viewer-hint mono">"LMB orbita · RMB/MMB move · roda zoom · F enquadra"</div>
             </div>
+            <Show when=move || clips.with(|c| !c.is_empty())>
+                <div class="viewer-toolbar anim-bar">
+                    <div class="tool-group">
+                        <span class="tool-label">"Animação"</span>
+                        <button class="toggle anim-btn" title="Animação anterior" on:click=move |_| cycle(-1)>"‹"</button>
+                        <select
+                            class="anim-select"
+                            on:change=move |ev| anim_sel.set(event_target_value(&ev).parse::<usize>().ok())
+                        >
+                            <option value="" selected=move || anim_sel.get().is_none()>"Pose de repouso"</option>
+                            {move || {
+                                clips
+                                    .get()
+                                    .into_iter()
+                                    .enumerate()
+                                    .map(|(i, a)| {
+                                        view! {
+                                            <option
+                                                value=i.to_string()
+                                                title=a.source.clone().unwrap_or_default()
+                                                selected=move || anim_sel.get() == Some(i)
+                                            >
+                                                {format!("{} ({:.1} s)", a.name, a.duration_secs)}
+                                            </option>
+                                        }
+                                    })
+                                    .collect_view()
+                            }}
+                        </select>
+                        <button class="toggle anim-btn" title="Próxima animação" on:click=move |_| cycle(1)>"›"</button>
+                    </div>
+                    <div class="tool-group">
+                        <button
+                            class="toggle anim-btn"
+                            title="Quadro anterior"
+                            disabled=move || anim_sel.get().is_none()
+                            on:click=move |_| step.run(-1)
+                        >
+                            "|◀"
+                        </button>
+                        <button
+                            class="toggle anim-btn anim-play"
+                            class:on=move || !anim_paused.get() && anim_sel.get().is_some()
+                            title=move || if anim_paused.get() { "Reproduzir" } else { "Pausar" }
+                            disabled=move || anim_sel.get().is_none()
+                            on:click=move |_| anim_paused.update(|p| *p = !*p)
+                        >
+                            {move || if anim_paused.get() { "▶" } else { "❚❚" }}
+                        </button>
+                        <button
+                            class="toggle anim-btn"
+                            title="Próximo quadro"
+                            disabled=move || anim_sel.get().is_none()
+                            on:click=move |_| step.run(1)
+                        >
+                            "▶|"
+                        </button>
+                    </div>
+                    <label class="tool-group anim-rate" title="Velocidade de reprodução (negativa toca ao contrário)">
+                        <span class="tool-label">"Velocidade"</span>
+                        <input
+                            type="number"
+                            step="0.1"
+                            min="-10"
+                            max="10"
+                            disabled=move || anim_sel.get().is_none()
+                            prop:value=move || anim_speed.get().to_string()
+                            on:change=move |ev| {
+                                // Invalid input re-sets the old value, which rewrites the field.
+                                match event_target_value(&ev).replace(',', ".").parse::<f32>() {
+                                    Ok(v) if v.is_finite() => anim_speed.set(((v * 100.0).round() / 100.0).clamp(-10.0, 10.0)),
+                                    _ => anim_speed.set(anim_speed.get_untracked()),
+                                }
+                            }
+                        />
+                        <span class="muted">"×"</span>
+                    </label>
+                    <span class="anim-time mono push-right">
+                        {move || {
+                            current_clip()
+                                .map(|a| {
+                                    let t = anim_time.get();
+                                    let frame = ((t * a.fps).round() as u32 + 1).min(a.frames);
+                                    format!("quadro {frame}/{} · {t:.2} / {:.2} s", a.frames, a.duration_secs)
+                                })
+                                .unwrap_or_else(|| "pose de repouso".to_string())
+                        }}
+                    </span>
+                </div>
+            </Show>
             <div class="viewer-toolbar">
                 <div class="tool-group">
                     <span class="tool-label">"LOD"</span>

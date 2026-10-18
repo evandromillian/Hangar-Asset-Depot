@@ -1,5 +1,6 @@
 //! Intermediate representation shared by all importers: a flat list of
-//! world-space triangle meshes plus PBR-ish materials.
+//! world-space triangle meshes plus PBR-ish materials, and — for animated
+//! sources — the node hierarchy, skins and baked clips ([`Rig`]).
 
 use hangar_core::TextureSlot;
 use std::sync::Arc;
@@ -15,6 +16,60 @@ pub struct Scene {
     /// Whether the source provided normals (before we generated missing ones).
     pub source_had_normals: bool,
     pub warnings: Vec<String>,
+    /// Present only when the source has animation that actually moves something.
+    pub rig: Option<Rig>,
+}
+
+/// Node hierarchy, skins and baked animation clips of an animated source.
+/// Meshes stay in world space (rest pose); the GLB writer moves rigid meshes
+/// into their node's space and skins the others.
+#[derive(Debug, Clone, Default)]
+pub struct Rig {
+    pub nodes: Vec<SceneNode>,
+    pub skins: Vec<Skin>,
+    pub clips: Vec<AnimClip>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SceneNode {
+    pub name: String,
+    pub parent: Option<usize>,
+    /// Rest local transform; rotation is a quaternion (x, y, z, w).
+    pub translation: [f32; 3],
+    pub rotation: [f32; 4],
+    pub scale: [f32; 3],
+    /// Rest node-to-world matrix and its inverse.
+    pub world: glam::Mat4,
+    pub world_inv: glam::Mat4,
+}
+
+#[derive(Debug, Clone)]
+pub struct Skin {
+    pub name: String,
+    /// Indices into [`Rig::nodes`]; `MeshPrim::joints` index this list.
+    pub joints: Vec<usize>,
+    /// Per joint: world-space rest vertex → joint space at bind time.
+    pub inverse_bind: Vec<glam::Mat4>,
+}
+
+#[derive(Debug, Clone)]
+pub struct AnimClip {
+    pub name: String,
+    pub duration: f32,
+    pub fps: f32,
+    pub channels: Vec<NodeChannel>,
+    /// Version path of the separate animation file the clip came from.
+    pub source: Option<String>,
+}
+
+/// Baked local-transform keys of one node; an empty list means "not animated".
+/// Times are seconds from the start of the clip.
+#[derive(Debug, Clone, Default)]
+pub struct NodeChannel {
+    pub node: usize,
+    pub translation: Vec<(f32, [f32; 3])>,
+    pub rotation: Vec<(f32, [f32; 4])>,
+    pub scale: Vec<(f32, [f32; 3])>,
 }
 
 /// One triangle list with a single material, already in world space
@@ -31,6 +86,13 @@ pub struct MeshPrim {
     pub indices: Vec<u32>,
     /// Authored LOD level parsed from the node/mesh name (`Body_LOD1` → 1).
     pub lod: Option<u32>,
+    /// Rigid animation: the [`Rig`] node this primitive moves with.
+    pub node: Option<usize>,
+    /// Skinning: index into [`Rig::skins`], with up to four influences per
+    /// vertex (`joints` / `weights` are empty or the length of `positions`).
+    pub skin: Option<usize>,
+    pub joints: Vec<[u16; 4]>,
+    pub weights: Vec<[f32; 4]>,
 }
 
 impl MeshPrim {
@@ -153,15 +215,29 @@ pub fn ensure_normals(mesh: &mut MeshPrim) {
 /// Deduplicating vertex builder used by importers that expand per-corner data.
 #[derive(Default)]
 pub struct VertexDedup {
-    map: std::collections::HashMap<[u32; 8], u32>,
+    map: std::collections::HashMap<[u32; 9], u32>,
     pub positions: Vec<[f32; 3]>,
     pub normals: Vec<[f32; 3]>,
     pub uvs: Vec<[f32; 2]>,
+    pub joints: Vec<[u16; 4]>,
+    pub weights: Vec<[f32; 4]>,
     pub indices: Vec<u32>,
 }
 
 impl VertexDedup {
     pub fn push(&mut self, p: [f32; 3], n: Option<[f32; 3]>, uv: Option<[f32; 2]>) {
+        self.push_skinned(p, n, uv, None);
+    }
+
+    /// Like [`push`](Self::push); `skin` is (source vertex id, joints, weights).
+    /// The vertex id keeps corners with different influences apart.
+    pub fn push_skinned(
+        &mut self,
+        p: [f32; 3],
+        n: Option<[f32; 3]>,
+        uv: Option<[f32; 2]>,
+        skin: Option<(u32, [u16; 4], [f32; 4])>,
+    ) {
         let nn = n.unwrap_or([0.0; 3]);
         let tt = uv.unwrap_or([0.0; 2]);
         let key = [
@@ -173,6 +249,7 @@ impl VertexDedup {
             nn[2].to_bits(),
             tt[0].to_bits(),
             tt[1].to_bits(),
+            skin.map(|s| s.0).unwrap_or(u32::MAX),
         ];
         let idx = *self.map.entry(key).or_insert_with(|| {
             self.positions.push(p);
@@ -181,6 +258,10 @@ impl VertexDedup {
             }
             if uv.is_some() {
                 self.uvs.push(tt);
+            }
+            if let Some((_, j, w)) = skin {
+                self.joints.push(j);
+                self.weights.push(w);
             }
             (self.positions.len() - 1) as u32
         });
@@ -195,8 +276,12 @@ impl VertexDedup {
             material,
             normals: if self.normals.len() == n { self.normals } else { vec![] },
             uvs: if self.uvs.len() == n { self.uvs } else { vec![] },
+            joints: if self.joints.len() == n { self.joints } else { vec![] },
+            weights: if self.weights.len() == n { self.weights } else { vec![] },
             positions: self.positions,
             indices: self.indices,
+            node: None,
+            skin: None,
         }
     }
 }

@@ -45,6 +45,7 @@ pub fn load(path: &Path, base_dir: &str) -> Result<Scene> {
             uvs: if uvs.len() == positions.len() { uvs } else { vec![] },
             positions,
             indices: mesh.indices,
+            ..Default::default()
         });
     }
     if need_default {

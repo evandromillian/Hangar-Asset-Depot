@@ -1,7 +1,8 @@
 //! Minimal glTF 2.0 binary (GLB) writer.
 
-use crate::scene::{Aabb, MeshPrim};
+use crate::scene::{Aabb, MeshPrim, Rig, SceneNode};
 use serde_json::{json, Value};
+use std::borrow::Cow;
 
 pub struct EncodedImage {
     pub name: String,
@@ -91,39 +92,62 @@ fn f32_bytes<const N: usize>(data: &[[f32; N]]) -> Vec<u8> {
     out
 }
 
-/// Serialise meshes + materials + images into a GLB.
-pub fn write_glb(meshes: &[MeshPrim], materials: &[GlbMaterial], images: &[EncodedImage]) -> Vec<u8> {
-    const ARRAY_BUFFER: u32 = 34962;
-    const ELEMENT_ARRAY_BUFFER: u32 = 34963;
-    const FLOAT: u32 = 5126;
-    const U16: u32 = 5123;
-    const U32: u32 = 5125;
+const ARRAY_BUFFER: u32 = 34962;
+const ELEMENT_ARRAY_BUFFER: u32 = 34963;
+const FLOAT: u32 = 5126;
+const U16: u32 = 5123;
+const U32: u32 = 5125;
 
+/// Serialise meshes + materials + images into a GLB. With a `rig`, the node
+/// hierarchy, skins and animation clips are written too (all under one root
+/// node, so viewers find a single animation root).
+pub fn write_glb(meshes: &[MeshPrim], materials: &[GlbMaterial], images: &[EncodedImage], rig: Option<&Rig>) -> Vec<u8> {
     let mut b = Builder { bin: Vec::new(), views: vec![], accessors: vec![] };
     let mut gl_meshes = Vec::new();
     let mut nodes = Vec::new();
+    // Per written mesh: (node json, rig node it hangs from).
+    let mut mesh_nodes: Vec<(Value, Option<usize>)> = Vec::new();
 
     for (i, m) in meshes.iter().enumerate() {
         if m.indices.is_empty() || m.positions.is_empty() {
             continue;
         }
+        // Rigid parts of an animated model live in their node's space.
+        let rig_node = rig.zip(m.node).and_then(|(r, n)| r.nodes.get(n).map(|node| (n, node)));
+        let (positions, normals) = match rig_node {
+            Some((_, node)) => {
+                let (p, n) = localize(m, node);
+                (Cow::Owned(p), Cow::Owned(n))
+            }
+            None => (Cow::Borrowed(&m.positions), Cow::Borrowed(&m.normals)),
+        };
         let bounds = {
             let mut a = Aabb::empty();
-            for p in &m.positions {
+            for p in positions.iter() {
                 a.extend(*p);
             }
             a
         };
-        let pv = b.view(&f32_bytes(&m.positions), Some(ARRAY_BUFFER));
-        let pa = b.accessor(pv, FLOAT, m.positions.len(), "VEC3", Some((bounds.min.to_vec(), bounds.max.to_vec())));
+        let pv = b.view(&f32_bytes(&positions), Some(ARRAY_BUFFER));
+        let pa = b.accessor(pv, FLOAT, positions.len(), "VEC3", Some((bounds.min.to_vec(), bounds.max.to_vec())));
         let mut attrs = json!({ "POSITION": pa });
-        if m.normals.len() == m.positions.len() {
-            let nv = b.view(&f32_bytes(&m.normals), Some(ARRAY_BUFFER));
-            attrs["NORMAL"] = json!(b.accessor(nv, FLOAT, m.normals.len(), "VEC3", None));
+        if normals.len() == positions.len() {
+            let nv = b.view(&f32_bytes(&normals), Some(ARRAY_BUFFER));
+            attrs["NORMAL"] = json!(b.accessor(nv, FLOAT, normals.len(), "VEC3", None));
         }
         if m.uvs.len() == m.positions.len() {
             let uv = b.view(&f32_bytes(&m.uvs), Some(ARRAY_BUFFER));
             attrs["TEXCOORD_0"] = json!(b.accessor(uv, FLOAT, m.uvs.len(), "VEC2", None));
+        }
+        let skin = m.skin.filter(|&s| {
+            rig.is_some_and(|r| s < r.skins.len()) && m.joints.len() == m.positions.len() && m.weights.len() == m.positions.len()
+        });
+        if skin.is_some() {
+            let joints: Vec<u8> = m.joints.iter().flatten().flat_map(|j| j.to_le_bytes()).collect();
+            let jv = b.view(&joints, Some(ARRAY_BUFFER));
+            attrs["JOINTS_0"] = json!(b.accessor(jv, U16, m.joints.len(), "VEC4", None));
+            let wv = b.view(&f32_bytes(&m.weights), Some(ARRAY_BUFFER));
+            attrs["WEIGHTS_0"] = json!(b.accessor(wv, FLOAT, m.weights.len(), "VEC4", None));
         }
         let (ibytes, ctype) = if m.positions.len() <= u16::MAX as usize {
             (m.indices.iter().flat_map(|&i| (i as u16).to_le_bytes()).collect::<Vec<u8>>(), U16)
@@ -138,8 +162,74 @@ pub fn write_glb(meshes: &[MeshPrim], materials: &[GlbMaterial], images: &[Encod
         }
         let name = if m.name.is_empty() { format!("mesh_{i}") } else { m.name.clone() };
         gl_meshes.push(json!({ "name": name, "primitives": [prim] }));
-        nodes.push(json!({ "name": name, "mesh": gl_meshes.len() - 1 }));
+        let mut node = json!({ "name": name, "mesh": gl_meshes.len() - 1 });
+        if let Some(s) = skin {
+            node["skin"] = json!(s);
+        }
+        mesh_nodes.push((node, rig_node.map(|(n, _)| n)));
     }
+
+    let mut skins = Vec::new();
+    let mut animations = Vec::new();
+    let root_nodes: Vec<usize> = match rig {
+        None => {
+            nodes.extend(mesh_nodes.into_iter().map(|(n, _)| n));
+            (0..nodes.len()).collect()
+        }
+        Some(rig) => {
+            // node 0: wrapper; 1..=N: rig nodes; then one node per mesh.
+            let rig_index = |n: usize| n + 1;
+            let mut children: Vec<Vec<usize>> = vec![vec![]; rig.nodes.len() + 1];
+            for (i, n) in rig.nodes.iter().enumerate() {
+                let parent = n.parent.filter(|&p| p < rig.nodes.len()).map(rig_index).unwrap_or(0);
+                children[parent].push(rig_index(i));
+            }
+            let first_mesh = rig.nodes.len() + 1;
+            for (k, (_, owner)) in mesh_nodes.iter().enumerate() {
+                children[owner.map(rig_index).unwrap_or(0)].push(first_mesh + k);
+            }
+            nodes.push(json!({ "name": "hangar_root" }));
+            for (i, n) in rig.nodes.iter().enumerate() {
+                let name = if n.name.is_empty() { format!("node_{i}") } else { n.name.clone() };
+                nodes.push(json!({ "name": name, "translation": n.translation, "rotation": n.rotation, "scale": n.scale }));
+            }
+            nodes.extend(mesh_nodes.into_iter().map(|(n, _)| n));
+            for (i, c) in children.into_iter().enumerate() {
+                if !c.is_empty() {
+                    nodes[i]["children"] = json!(c);
+                }
+            }
+            for s in &rig.skins {
+                let ibm: Vec<[f32; 16]> = s.inverse_bind.iter().map(|m| m.to_cols_array()).collect();
+                let v = b.view(&f32_bytes(&ibm), None);
+                let a = b.accessor(v, FLOAT, ibm.len(), "MAT4", None);
+                let joints: Vec<usize> = s.joints.iter().map(|&j| rig_index(j.min(rig.nodes.len() - 1))).collect();
+                skins.push(json!({ "name": s.name, "joints": joints, "inverseBindMatrices": a }));
+            }
+            for clip in &rig.clips {
+                let mut samplers = Vec::new();
+                let mut channels = Vec::new();
+                for ch in clip.channels.iter().filter(|c| c.node < rig.nodes.len()) {
+                    let target = rig_index(ch.node);
+                    let paths = [
+                        ("translation", sampler(&mut b, &ch.translation)),
+                        ("rotation", sampler(&mut b, &ch.rotation)),
+                        ("scale", sampler(&mut b, &ch.scale)),
+                    ];
+                    for (path, s) in paths {
+                        if let Some((input, output)) = s {
+                            channels.push(json!({ "sampler": samplers.len(), "target": { "node": target, "path": path } }));
+                            samplers.push(json!({ "input": input, "output": output, "interpolation": "LINEAR" }));
+                        }
+                    }
+                }
+                if !channels.is_empty() {
+                    animations.push(json!({ "name": clip.name, "samplers": samplers, "channels": channels }));
+                }
+            }
+            vec![0]
+        }
+    };
 
     let mut gl_images = Vec::new();
     let mut textures = Vec::new();
@@ -189,11 +279,10 @@ pub fn write_glb(meshes: &[MeshPrim], materials: &[GlbMaterial], images: &[Encod
         .collect();
 
     b.align();
-    let node_ids: Vec<usize> = (0..nodes.len()).collect();
     let mut doc = json!({
         "asset": { "version": "2.0", "generator": "hangar-pipeline" },
         "scene": 0,
-        "scenes": [{ "name": "Scene", "nodes": node_ids }],
+        "scenes": [{ "name": "Scene", "nodes": root_nodes }],
         "nodes": nodes,
         "meshes": gl_meshes,
         "accessors": b.accessors,
@@ -202,6 +291,12 @@ pub fn write_glb(meshes: &[MeshPrim], materials: &[GlbMaterial], images: &[Encod
     });
     if !gl_materials.is_empty() {
         doc["materials"] = json!(gl_materials);
+    }
+    if !skins.is_empty() {
+        doc["skins"] = json!(skins);
+    }
+    if !animations.is_empty() {
+        doc["animations"] = json!(animations);
     }
     if !gl_images.is_empty() {
         doc["images"] = json!(gl_images);
@@ -227,6 +322,36 @@ pub fn write_glb(meshes: &[MeshPrim], materials: &[GlbMaterial], images: &[Encod
     out
 }
 
+/// World-space rest geometry → the space of `node` (positions by the inverse
+/// world matrix, normals by its transpose: the inverse of the normal matrix).
+fn localize(m: &MeshPrim, node: &SceneNode) -> (Vec<[f32; 3]>, Vec<[f32; 3]>) {
+    let positions = m.positions.iter().map(|p| node.world_inv.transform_point3((*p).into()).into()).collect();
+    let to_local = glam::Mat3::from_mat4(node.world).transpose();
+    let normals = m.normals.iter().map(|n| (to_local * glam::Vec3::from(*n)).normalize_or_zero().into()).collect();
+    (positions, normals)
+}
+
+/// Writes one animation sampler (input times + output values); None for an
+/// empty channel. Repeated times keep the last value (glTF needs strictly
+/// increasing input).
+fn sampler<const N: usize>(b: &mut Builder, keys: &[(f32, [f32; N])]) -> Option<(usize, usize)> {
+    let mut clean: Vec<(f32, [f32; N])> = Vec::with_capacity(keys.len());
+    for &(t, v) in keys {
+        match clean.last_mut() {
+            Some(last) if t <= last.0 => last.1 = v,
+            _ => clean.push((t, v)),
+        }
+    }
+    let (first, last) = (clean.first()?.0, clean.last()?.0);
+    let times: Vec<[f32; 1]> = clean.iter().map(|k| [k.0]).collect();
+    let values: Vec<[f32; N]> = clean.iter().map(|k| k.1).collect();
+    let tv = b.view(&f32_bytes(&times), None);
+    let input = b.accessor(tv, FLOAT, times.len(), "SCALAR", Some((vec![first], vec![last])));
+    let vv = b.view(&f32_bytes(&values), None);
+    let output = b.accessor(vv, FLOAT, values.len(), if N == 4 { "VEC4" } else { "VEC3" }, None);
+    Some((input, output))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -240,13 +365,13 @@ mod tests {
             normals: vec![[0.0, 0.0, 1.0]; 3],
             uvs: vec![[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]],
             indices: vec![0, 1, 2],
-            lod: None,
+            ..Default::default()
         };
         let img = image::RgbaImage::from_pixel(2, 2, image::Rgba([255, 0, 0, 255]));
         let png = crate::images::encode_png(&img);
         let mut mat = GlbMaterial::new("M_Body");
         mat.base_color_tex = Some(0);
-        let glb = write_glb(&[m], &[mat], &[EncodedImage { name: "bc".into(), bytes: png, mime: "image/png" }]);
+        let glb = write_glb(&[m], &[mat], &[EncodedImage { name: "bc".into(), bytes: png, mime: "image/png" }], None);
         assert_eq!(glb.len() % 4, 0);
         let g = gltf::Gltf::from_slice(&glb).expect("valid glb");
         assert_eq!(g.materials().next().unwrap().name(), Some("M_Body"));

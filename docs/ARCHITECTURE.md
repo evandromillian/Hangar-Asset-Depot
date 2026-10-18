@@ -71,7 +71,12 @@ relevantes (modelos, imagens, áudio) para um diretório temporário e chama
 `hangar_pipeline::process` em `spawn_blocking`:
 
 1. **Arquivo primário** — `.glb/.gltf` > `.fbx` > `.obj` > `.blend`. Vários arquivos de
-   modelo com sufixo `_LOD0`, `_LOD1`… são tratados como LODs autorais.
+   modelo com sufixo `_LOD0`, `_LOD1`… são tratados como LODs autorais. Com mais de um FBX,
+   cada um é inspecionado: arquivos sem geometria não viram modelo, e nomes `Modelo@Clipe.fbx`
+   perdem a preferência. Os demais FBX cujos takes se movem são **arquivos de animação**: os
+   takes são aplicados ao modelo casando nós pelo nome (sem maiúsculas e sem namespace —
+   `mixamorig:Hips` ↔ `Hips`); takes com nome genérico ("Take 001", "mixamo.com") recebem o
+   nome do arquivo (`Shark@Swim.fbx` → "Swim").
 2. **Importação** — `ufbx` (FBX, normaliza para Y-up/metros), `gltf` e `tobj`.
    Formatos não suportados nativamente (ex.: `.blend`) ou falhas caem no **fallback do
    Blender headless** (`tools/blender/export_glb.py`), quando configurado.
@@ -88,6 +93,13 @@ relevantes (modelos, imagens, áudio) para um diretório temporário e chama
    Skins manuais de `.hangar/materials.json` entram com `detected_by: "manual"`.
 5. **LODs** — autorais (por nome) ou gerados com `meshopt::simplify` (50% / 25% / 10% por
    padrão), cada um exportado como **GLB autocontido** com texturas reduzidas.
+   **Animação (FBX):** quando algum take realmente se move (o "Take 001" vazio que quase
+   todo exportador grava é ignorado), cada take é amostrado na taxa de quadros do arquivo
+   com `ufbx::bake_anim` e o GLB ganha a hierarquia de nós (sob um nó raiz único), as skins
+   (até 4 ossos por vértice) e os clipes. As malhas continuam em espaço de mundo no resto do
+   pipeline; o writer do GLB leva as partes rígidas para o espaço do seu nó. O manifesto
+   lista os clipes em `animations` (nome, duração, fps, quadros e, para clipes de arquivos
+   separados, `source`).
 6. **Thumbnail** — rasterizador em software (z-buffer + Lambert + textura base) gera um
    PNG sem precisar de GPU no servidor.
 7. **Texturas e áudio** — previews web (PNG/JPEG ≤ 2048 px) e envelope de picos para
@@ -128,8 +140,13 @@ O Leptos faz todo o HTTP e envia mensagens ao Bevy:
 
 * `LoadModel { bytes }` — GLB do LOD escolhido (via fonte de assets em memória);
   a câmera é preservada entre versões, então alternar v1/v2 funciona como comparação A/B.
-* `ApplyVariant { textures }` — troca as texturas dos materiais por nome.
+* `ApplyVariant { textures, hidden }` — troca as texturas dos materiais por nome e oculta
+  texturas (pré-visualização da aba Materiais).
 * `SetWireframe`, `SetAutoRotate`, `SetGrid`, `ResetCamera`.
+* `SelectAnimation`, `SetAnimationPaused`, `StepAnimation(±quadros)`, `SetAnimationSpeed`
+  — barra de animação (seletor com anterior/próxima, pausa, quadro a quadro e velocidade,
+  negativa toca ao contrário). Os clipes do GLB vão para um `AnimationGraph`; o Bevy
+  responde com `AnimationTime` para o contador de quadros.
 
 Controles: botão esquerdo orbita, direito/meio faz pan, roda dá zoom, `F` enquadra.
 
