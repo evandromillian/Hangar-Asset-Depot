@@ -517,8 +517,10 @@ select { appearance: none; background-image: linear-gradient(45deg, transparent 
 .mat-slot-row.off .slot-name { text-decoration: line-through; }
 .mat-slot-row.off .mat-thumb { opacity: 0.25; filter: grayscale(1); }
 .mat-hidden-bar {
-  display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 11.5px;
-  padding: 6px 10px; border: 1px dashed var(--line-2); border-radius: var(--radius);
+  position: sticky; bottom: 4px; z-index: 2; align-self: flex-end; max-width: 100%;
+  display: flex; align-items: center; gap: 12px; font-size: 11.5px;
+  padding: 7px 12px; background: var(--bg-2); border: 1px solid var(--line-2); border-left: 3px solid var(--accent);
+  border-radius: var(--radius); box-shadow: 0 6px 18px rgba(0, 0, 0, 0.5); animation: fade 0.12s ease-out;
 }
 .mat-slot-row select { height: 30px; font-size: 12px; padding-top: 0; padding-bottom: 0; min-width: 0; width: 100%; }
 .mat-thumb { width: 30px; height: 30px; border-radius: 4px; overflow: hidden; border: 1px solid var(--line); display: block; }

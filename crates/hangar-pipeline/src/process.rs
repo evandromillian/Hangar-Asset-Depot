@@ -817,6 +817,9 @@ fn build_glb_materials(
         if let Some(e) = get(TextureSlot::Emissive) {
             g.emissive_tex = Some(add_decoded(&mut imgs, format!("{}_emissive", m.name), &e));
         }
+        if let Some(s) = get(TextureSlot::Specular) {
+            g.specular_tex = Some(add_decoded(&mut imgs, format!("{}_specular", m.name), &s));
+        }
         out.push(g);
     }
     (out, imgs)

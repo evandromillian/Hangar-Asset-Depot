@@ -10,8 +10,8 @@ use std::collections::BTreeMap;
 /// Version-relative path of the configuration file.
 pub const MATERIAL_CONFIG_PATH: &str = ".hangar/materials.json";
 
-/// Slots that can be assigned by hand, in display order. Height / specular are
-/// left out: the GLB export doesn't use them.
+/// Slots that can be assigned by hand, in display order. Height is left out:
+/// the GLB export doesn't use it.
 pub const EDITABLE_SLOTS: &[TextureSlot] = &[
     TextureSlot::BaseColor,
     TextureSlot::Normal,
@@ -20,6 +20,7 @@ pub const EDITABLE_SLOTS: &[TextureSlot] = &[
     TextureSlot::Roughness,
     TextureSlot::Metallic,
     TextureSlot::Occlusion,
+    TextureSlot::Specular,
     TextureSlot::Emissive,
     TextureSlot::Opacity,
 ];

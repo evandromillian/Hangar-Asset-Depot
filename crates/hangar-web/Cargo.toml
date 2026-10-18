@@ -46,6 +46,8 @@ bevy = { version = "0.19", default-features = false, features = [
     "bevy_gltf",
     # Animation clips + AnimationPlayer for animated GLBs (skins work without it).
     "gltf_animation",
+    # KHR_materials_specular maps (the "Specular" texture slot).
+    "pbr_specular_textures",
     "bevy_mesh",
     "bevy_image",
     "bevy_camera",

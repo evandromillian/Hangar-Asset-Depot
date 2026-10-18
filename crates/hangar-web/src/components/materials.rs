@@ -566,12 +566,6 @@ pub fn MaterialsPanel(
                         on:input=move |ev| filter.set(event_target_value(&ev))
                     />
                 </Show>
-                <Show when=move || hidden.with(|h| !h.is_empty())>
-                    <div class="mat-hidden-bar">
-                        <span class="muted">"Texturas ocultas só na pré-visualização; nada disso é salvo."</span>
-                        <button class="link-btn" on:click=move |_| hidden.set(HiddenSet::new())>"Mostrar todas"</button>
-                    </div>
-                </Show>
                 {cards}
                 <Show when=move || !can_write.get()>
                     <p class="muted hint">"Somente leitura: você precisa ser editor do projeto para alterar materiais."</p>
@@ -591,6 +585,20 @@ pub fn MaterialsPanel(
                             </button>
                         </div>
                         <p class="muted hint">"Cria uma versão nova com " <code>{MATERIAL_CONFIG_PATH}</code> "; as texturas são aplicadas aos GLBs e à miniatura no reprocessamento."</p>
+                    </div>
+                </Show>
+                // Floats over the bottom of the panel (sticky, last in the flow) so
+                // toggling a texture never shifts the rows under the cursor.
+                <Show when=move || hidden.with(|h| !h.is_empty())>
+                    <div class="mat-hidden-bar" role="status">
+                        <span>
+                            {move || {
+                                let n = hidden.with(|h| h.len());
+                                format!("{n} textura{s} oculta{s}", s = if n > 1 { "s" } else { "" })
+                            }}
+                            <span class="muted">" · só na pré-visualização, nada é salvo"</span>
+                        </span>
+                        <button class="link-btn" on:click=move |_| hidden.set(HiddenSet::new())>"Mostrar todas"</button>
                     </div>
                 </Show>
             </Show>

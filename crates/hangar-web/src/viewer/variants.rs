@@ -23,6 +23,8 @@ struct OriginalMaterial {
     metallic_roughness: Option<Handle<Image>>,
     occlusion: Option<Handle<Image>>,
     emissive_texture: Option<Handle<Image>>,
+    specular_tint: Color,
+    specular: Option<Handle<Image>>,
 }
 
 impl OriginalMaterial {
@@ -37,6 +39,8 @@ impl OriginalMaterial {
             metallic_roughness: m.metallic_roughness_texture.clone(),
             occlusion: m.occlusion_texture.clone(),
             emissive_texture: m.emissive_texture.clone(),
+            specular_tint: m.specular_tint,
+            specular: m.specular_tint_texture.clone(),
         }
     }
 
@@ -50,8 +54,14 @@ impl OriginalMaterial {
         m.metallic_roughness_texture = self.metallic_roughness.clone();
         m.occlusion_texture = self.occlusion.clone();
         m.emissive_texture = self.emissive_texture.clone();
+        m.specular_tint = self.specular_tint;
+        m.specular_tint_texture = self.specular.clone();
     }
 }
+
+/// `specularColorFactor` the pipeline writes next to a specular map, as Bevy's
+/// glTF loader turns it into a tint (reflectance stays at its default 0.5).
+const SPECULAR_TINT: Color = Color::linear_rgb(2.0, 2.0, 2.0);
 
 #[derive(Resource, Default)]
 pub struct VariantState {
@@ -210,6 +220,10 @@ pub fn apply_pending_variant(
             material.emissive_texture = Some(h);
             material.emissive = LinearRgba::WHITE;
         }
+        if let Some(h) = ours(TextureSlot::Specular) {
+            material.specular_tint_texture = Some(h);
+            material.specular_tint = SPECULAR_TINT;
+        }
         hide_textures(&mut material, |slot| hidden(slot).cloned());
     }
     state.dirty = false;
@@ -233,6 +247,10 @@ fn hide_textures(material: &mut StandardMaterial, hidden: impl Fn(TextureSlot) -
     if hidden(TextureSlot::Emissive).is_some() {
         material.emissive_texture = None;
         material.emissive = LinearRgba::BLACK;
+    }
+    if hidden(TextureSlot::Specular).is_some() {
+        material.specular_tint_texture = None;
+        material.specular_tint = Color::WHITE;
     }
 }
 

@@ -4,6 +4,8 @@ use crate::scene::{Aabb, MeshPrim, Rig, SceneNode};
 use serde_json::{json, Value};
 use std::borrow::Cow;
 
+const SPECULAR_EXT: &str = "KHR_materials_specular";
+
 pub struct EncodedImage {
     pub name: String,
     pub bytes: Vec<u8>,
@@ -25,6 +27,9 @@ pub struct GlbMaterial {
     pub metallic_roughness_tex: Option<usize>,
     pub occlusion_tex: Option<usize>,
     pub emissive_tex: Option<usize>,
+    /// Specular level map (reflectance convention: 0.5 = the default 4 % F0),
+    /// written as `KHR_materials_specular`.
+    pub specular_tex: Option<usize>,
 }
 
 impl GlbMaterial {
@@ -42,6 +47,7 @@ impl GlbMaterial {
             metallic_roughness_tex: None,
             occlusion_tex: None,
             emissive_tex: None,
+            specular_tex: None,
         }
     }
 }
@@ -275,6 +281,14 @@ pub fn write_glb(meshes: &[MeshPrim], materials: &[GlbMaterial], images: &[Encod
             } else if m.emissive.iter().any(|&c| c > 0.0) {
                 mat["emissiveFactor"] = json!(m.emissive);
             }
+            if let Some(t) = m.specular_tex {
+                // The extension's conversion from a reflectance parameter: the
+                // map becomes the specular colour, with a factor of 2 (0.08 vs 0.04).
+                mat["extensions"] = json!({ SPECULAR_EXT: {
+                    "specularColorTexture": { "index": t },
+                    "specularColorFactor": [2.0, 2.0, 2.0],
+                } });
+            }
             mat
         })
         .collect();
@@ -290,6 +304,9 @@ pub fn write_glb(meshes: &[MeshPrim], materials: &[GlbMaterial], images: &[Encod
         "bufferViews": b.views,
         "buffers": [{ "byteLength": b.bin.len() }],
     });
+    if materials.iter().any(|m| m.specular_tex.is_some()) {
+        doc["extensionsUsed"] = json!([SPECULAR_EXT]);
+    }
     if !gl_materials.is_empty() {
         doc["materials"] = json!(gl_materials);
     }

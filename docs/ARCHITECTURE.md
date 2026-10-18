@@ -95,7 +95,13 @@ relevantes (modelos, imagens, áudio) para um diretório temporário e chama
    → **atribuição manual** (`.hangar/materials.json`, ver abaixo) → nome do material
    (`M_Body` ↔ `T_Body_BaseColor.png`) → "irmãos" de uma textura já resolvida (mesma pasta e
    nome, só o slot muda: `Tank_BaseColor.1001` → `Tank_Normal.1001`). O slot é detectado
-   pelo sufixo (`_D`, `_BaseColor`, `_N`, `_ORM`, `_R`, `_M`, `_AO`, `_E`...).
+   pelo sufixo (`_D`, `_BaseColor`, `_N`, `_ORM`, `_R`, `_M`, `_AO`, `_E`, `_S`...).
+   **Specular:** mapas de nível especular (`_S`, `_Spec`, `_Specular`; slot specular do FBX,
+   `map_Ks` do OBJ, `KHR_materials_specular` do glTF) seguem a convenção de refletância
+   (0,5 = os 4 % padrão de F0, como o *Specular* da Unreal) e vão para o GLB como
+   `KHR_materials_specular` (`specularColorTexture` com `specularColorFactor` 2, a conversão
+   indicada pela extensão). Mapas de glossiness (`_Gloss`) não são specular. Só afeta
+   superfícies não metálicas.
 4. **Variantes de textura** — dois arquivos que diferem em um único token que não é um slot
    nem um número (`Desert/T_Body_D.png` × `Woodland/T_Body_D.png`, ou `T_Body_Desert_D` ×
    `T_Body_Woodland_D`) formam variantes. A primeira referenciada pelo modelo é a padrão.

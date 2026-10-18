@@ -439,7 +439,7 @@ struct GltfBin {
 impl GltfBin {
     /// Appends little-endian data and returns the accessor index.
     fn add(&mut self, bytes: Vec<u8>, component: u32, count: usize, ty: &str, minmax: Option<(&str, &str)>) -> usize {
-        while self.bin.len() % 4 != 0 {
+        while !self.bin.len().is_multiple_of(4) {
             self.bin.push(0);
         }
         self.views.push(format!(r#"{{"buffer":0,"byteOffset":{},"byteLength":{}}}"#, self.bin.len(), bytes.len()));

@@ -31,7 +31,8 @@ pub fn slot_from_token(token: &str) -> Option<TextureSlot> {
         "e" | "emissive" | "emission" | "emit" | "glow" | "illum" | "selfillum" => Emissive,
         "h" | "height" | "disp" | "displacement" | "bump" | "heightmap" => Height,
         "opacity" | "alpha" | "transparency" | "transparent" | "o" => Opacity,
-        "s" | "spec" | "specular" | "gloss" | "glossiness" | "specularlevel" => Specular,
+        // Glossiness maps are inverted roughness, not specular: no slot.
+        "s" | "spec" | "specular" | "specularlevel" | "specularmap" => Specular,
         _ => return None,
     })
 }
@@ -97,6 +98,7 @@ fn compound_slot(token: &str) -> Option<(&'static str, TextureSlot)> {
         ("emissive", TextureSlot::Emissive),
         ("height", TextureSlot::Height),
         ("opacity", TextureSlot::Opacity),
+        ("specular", TextureSlot::Specular),
     ];
     SUFFIXES.iter().find(|(s, _)| t.len() > s.len() && t.ends_with(s)).copied()
 }
@@ -467,6 +469,7 @@ const HEURISTIC_SLOTS: &[TextureSlot] = &[
     TextureSlot::Occlusion,
     TextureSlot::Emissive,
     TextureSlot::Opacity,
+    TextureSlot::Specular,
 ];
 
 /// Whether two different slots feed the same glTF channels, so only one of
@@ -541,6 +544,10 @@ mod tests {
         assert_eq!(detect_slot("body_BaseColor.png"), Some(TextureSlot::BaseColor));
         assert_eq!(detect_slot("body-roughness.jpg"), Some(TextureSlot::Roughness));
         assert_eq!(detect_slot("TankBaseColor.png"), Some(TextureSlot::BaseColor));
+        assert_eq!(detect_slot("T_Body_S.png"), Some(TextureSlot::Specular));
+        assert_eq!(detect_slot("body_spec_2k.tga"), Some(TextureSlot::Specular));
+        assert_eq!(detect_slot("BodySpecular.png"), Some(TextureSlot::Specular));
+        assert_eq!(detect_slot("body_gloss.png"), None, "glossiness is not specular");
         assert_eq!(detect_slot("logo.png"), None);
     }
 

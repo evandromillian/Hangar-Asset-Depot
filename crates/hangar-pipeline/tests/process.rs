@@ -254,6 +254,44 @@ fn manual_material_config() {
     assert!(mat.pbr_metallic_roughness().base_color_texture().is_some(), "barrel texture baked into the GLB");
 }
 
+/// Specular maps: a `_S` sibling of the body maps is picked up automatically,
+/// one assigned by hand in `.hangar/materials.json` reaches the barrel, and
+/// both are exported as `KHR_materials_specular` with the reflectance factor.
+#[test]
+fn specular_maps() {
+    let dir = tempfile::tempdir().unwrap();
+    make_tank(dir.path());
+    write_png(&dir.path().join("Textures/T_Tank_Body_S.png"), [128, 128, 128]);
+    write_png(&dir.path().join("Textures/Barrel_Spec.png"), [200, 200, 200]);
+    std::fs::create_dir_all(dir.path().join(".hangar")).unwrap();
+    std::fs::write(
+        dir.path().join(MATERIAL_CONFIG_PATH),
+        r#"{ "materials": { "M_Tank_Barrel": { "specular": "Textures/Barrel_Spec.png" } } }"#,
+    )
+    .unwrap();
+    let files = entries(dir.path());
+    let res = process(&ProcessInput { root: dir.path(), files: &files, skeletons: &[] }, &PipelineConfig::default()).unwrap();
+    let m = &res.manifest;
+    assert!(m.warnings.is_empty(), "warnings: {:?}", m.warnings);
+    let spec = |name: &str| {
+        let mat = m.materials.iter().find(|x| x.name == name).unwrap();
+        mat.textures.iter().find(|t| t.slot == TextureSlot::Specular).map(|t| (t.path.clone().unwrap(), t.resolved_by.clone()))
+    };
+    assert_eq!(spec("M_Tank_Body").map(|(p, _)| p).as_deref(), Some("Textures/T_Tank_Body_S.png"));
+    assert_eq!(spec("M_Tank_Barrel"), Some(("Textures/Barrel_Spec.png".to_string(), "manual".to_string())));
+
+    let glb = res.artifacts.iter().find(|a| a.role == ArtifactRole::LodGlb(0)).unwrap();
+    let g = gltf::Gltf::from_slice(&glb.bytes).unwrap();
+    assert!(g.extensions_used().any(|e| e == "KHR_materials_specular"));
+    for name in ["M_Tank_Body", "M_Tank_Barrel"] {
+        let mat = g.materials().find(|x| x.name() == Some(name)).unwrap();
+        let s = mat.specular().unwrap_or_else(|| panic!("{name}: no KHR_materials_specular"));
+        assert!(s.specular_color_texture().is_some(), "{name}");
+        assert_eq!(s.specular_color_factor(), [2.0, 2.0, 2.0]);
+        assert_eq!(s.specular_factor(), 1.0);
+    }
+}
+
 #[test]
 fn image_only_version() {
     let dir = tempfile::tempdir().unwrap();

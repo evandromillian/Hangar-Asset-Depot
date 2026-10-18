@@ -485,6 +485,10 @@ fn convert_material(m: &ufbx::Material, base_dir: &str) -> Material {
     push(TextureSlot::Emissive, &pbr.emission_color);
     push(TextureSlot::Emissive, &m.fbx.emission_color);
     push(TextureSlot::Opacity, &pbr.opacity);
+    push(TextureSlot::Specular, &pbr.specular_color);
+    push(TextureSlot::Specular, &m.fbx.specular_color);
+    push(TextureSlot::Specular, &pbr.specular_factor);
+    push(TextureSlot::Specular, &m.fbx.specular_factor);
 
     // The "Bump" slot very often holds a normal map in exported FBX files.
     if let Some(t) = m.fbx.bump.texture.as_ref()

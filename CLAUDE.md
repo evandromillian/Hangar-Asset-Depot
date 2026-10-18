@@ -113,6 +113,9 @@ prepared statements. Add `?sslmode=require`.
   (`hangar_core::MaterialConfig`): base slot assignments override automatic resolution, skins become
   `detected_by: "manual"` variants. The web "Materiais" tab edits it and commits a new version; the
   viewer's live preview must mirror the GLB export's factor rules (`viewer/variants.rs`).
+  The Specular slot (reflectance convention, 0.5 = default 4 % F0) is exported as
+  `KHR_materials_specular` (`specularColorTexture`, `specularColorFactor` 2); the viewer needs
+  Bevy's `pbr_specular_textures` feature (two more fragment-shader textures — mind WebGL2's 16).
 - Meshes (`MeshPrim`) are always world-space rest pose. An animated FBX or glTF/GLB additionally
   yields a `scene::Rig` (hierarchy, skins, baked clips; glTF skinned vertices are mapped from bind
   space by joint world × inverse bind, and the rig's inverse binds compensate, so playback is exact;

@@ -97,6 +97,7 @@ fn convert_material(m: &tobj::Material, base_dir: &str) -> Material {
     push(TextureSlot::Metallic, param("map_Pm"));
     push(TextureSlot::Emissive, param("map_Ke"));
     push(TextureSlot::Opacity, m.dissolve_texture.as_ref());
+    push(TextureSlot::Specular, m.specular_texture.as_ref());
     push(TextureSlot::Occlusion, m.ambient_texture.as_ref().filter(|p| {
         crate::textures::detect_slot(p) == Some(TextureSlot::Occlusion)
     }));

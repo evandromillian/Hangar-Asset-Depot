@@ -103,6 +103,9 @@ pub fn load(path: &Path, base_dir: &str, importer: &'static str) -> Result<Scene
         }
         push(TextureSlot::Normal, m.normal_texture().map(|t| t.texture()));
         push(TextureSlot::Emissive, m.emissive_texture().map(|t| t.texture()));
+        // Spec/gloss specular colours are F0 itself, not a specular level: only
+        // KHR_materials_specular feeds the slot.
+        push(TextureSlot::Specular, m.specular().and_then(|s| s.specular_color_texture()).map(|t| t.texture()));
         mat.textures.extend(roughness);
         out.materials.push(mat);
     }
