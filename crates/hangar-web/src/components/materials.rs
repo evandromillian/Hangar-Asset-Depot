@@ -1,9 +1,11 @@
 //! Materials tab: assign the version's textures to material slots by hand and
 //! author skins. Edits are previewed live in the viewer (as a draft) and saved
 //! as `.hangar/materials.json` in a new version, which the pipeline bakes.
+//! Per-slot checkboxes hide textures in the preview only; they are never saved.
 
 use crate::api;
 use crate::components::common::ErrorBanner;
+use crate::viewer::{HiddenTexture, ViewerDraft};
 use hangar_core::{
     CommitVersionRequest, EDITABLE_SLOTS, MATERIAL_CONFIG_PATH, MaterialConfig, MaterialInfo, PreviewKind,
     PreviewManifest, SkinConfig, TextureOverride, TextureSlot, VersionDto, VersionStatus, blob_url, paths,
@@ -55,13 +57,36 @@ fn pruned(cfg: &MaterialConfig) -> MaterialConfig {
     c
 }
 
+/// Texture a slot shows for the edited target: skin override, else the base
+/// assignment (`None` when forced empty), else what is baked into the GLB.
+fn effective(m: &MaterialInfo, cfg: &MaterialConfig, target: Target, slot: TextureSlot) -> Option<String> {
+    if let Target::Skin(i) = target
+        && let Some(path) = cfg
+            .skins
+            .get(i)
+            .and_then(|s| s.materials.iter().find(|(k, _)| k.eq_ignore_ascii_case(&m.name)))
+            .and_then(|(_, slots)| slots.get(&slot))
+    {
+        return Some(path.clone());
+    }
+    match cfg.assignments(&m.name).and_then(|a| a.get(&slot)) {
+        Some(v) => v.clone(),
+        None => baked(m, slot).map(str::to_string),
+    }
+}
+
+/// Material + slot switched off in the preview.
+type HiddenSet = HashSet<(String, TextureSlot)>;
+
 /// What the viewer should show for the edited target: base assignments that
-/// differ from the baked textures, plus the skin's overrides.
-fn compute_draft(p: &PreviewManifest, cfg: &MaterialConfig, target: Target) -> Option<Vec<TextureOverride>> {
+/// differ from the baked textures, the skin's overrides, and hidden textures.
+fn compute_draft(p: &PreviewManifest, cfg: &MaterialConfig, target: Target, hidden: &HiddenSet) -> Option<ViewerDraft> {
     let previews: HashMap<&str, &str> =
         p.textures.iter().filter_map(|t| t.preview_hash.as_deref().map(|h| (t.path.as_str(), h))).collect();
     let mut out = Vec::new();
+    let mut hidden_out = Vec::new();
     for m in &p.materials {
+        let is_hidden = |slot: TextureSlot| hidden.contains(&(m.name.clone(), slot));
         let mut slots: BTreeMap<TextureSlot, String> = BTreeMap::new();
         if let Some(a) = cfg.assignments(&m.name) {
             for (&slot, path) in a {
@@ -76,13 +101,41 @@ fn compute_draft(p: &PreviewManifest, cfg: &MaterialConfig, target: Target) -> O
         {
             slots.extend(ms.iter().map(|(s, p)| (*s, p.clone())));
         }
+        // ORM / metal-rough / roughness / metallic are baked into one metal/rough
+        // texture. Hiding any of them makes the viewer drop it and rebuild from
+        // the visible maps (same priority as the GLB export), so send them all.
+        let family = [TextureSlot::Orm, TextureSlot::MetallicRoughness, TextureSlot::Roughness, TextureSlot::Metallic];
+        if family.iter().any(|s| is_hidden(*s)) {
+            for slot in family.into_iter().chain([TextureSlot::Occlusion]) {
+                if !is_hidden(slot)
+                    && let Some(path) = effective(m, cfg, target, slot)
+                {
+                    slots.entry(slot).or_insert(path);
+                }
+            }
+        }
         for (slot, path) in slots {
+            if is_hidden(slot) {
+                continue;
+            }
             if let Some(h) = previews.get(path.as_str()) {
                 out.push(TextureOverride { material: m.name.clone(), slot, path, preview_hash: h.to_string() });
             }
         }
+        for &slot in EDITABLE_SLOTS {
+            if is_hidden(slot) && effective(m, cfg, target, slot).is_some() {
+                hidden_out.push(HiddenTexture {
+                    material: m.name.clone(),
+                    slot,
+                    alpha: m.base_color[3],
+                    metallic: m.metallic,
+                    roughness: m.roughness,
+                });
+            }
+        }
     }
-    (target != Target::Base || !out.is_empty()).then_some(out)
+    (target != Target::Base || !out.is_empty() || !hidden_out.is_empty())
+        .then_some(ViewerDraft { overrides: out, hidden: hidden_out })
 }
 
 #[component]
@@ -90,8 +143,8 @@ pub fn MaterialsPanel(
     version: Signal<Option<VersionDto>>,
     asset_id: Signal<Uuid>,
     can_write: Signal<bool>,
-    /// Shared with the viewer: unsaved assignments to preview.
-    draft: RwSignal<Option<Vec<TextureOverride>>>,
+    /// Shared with the viewer: unsaved assignments and hidden textures to preview.
+    draft: RwSignal<Option<ViewerDraft>>,
     on_committed: Callback<VersionDto>,
 ) -> impl IntoView {
     let preview = Memo::new(move |_| version.with(|v| v.as_ref().and_then(editable_model).cloned()));
@@ -103,6 +156,8 @@ pub fn MaterialsPanel(
     let edit = RwSignal::new(MaterialConfig::default());
     let target = RwSignal::new(Target::Base);
     let open = RwSignal::new(HashSet::<String>::new());
+    // Preview-only toggles: never part of the saved configuration.
+    let hidden = RwSignal::new(HiddenSet::new());
     let filter = RwSignal::new(String::new());
     let message = RwSignal::new(String::new());
     let saving = RwSignal::new(false);
@@ -116,6 +171,7 @@ pub fn MaterialsPanel(
         baseline.set(None);
         error.set(None);
         target.set(Target::Base);
+        hidden.set(HiddenSet::new());
         spawn_local(async move {
             let res = api::material_config(v).await;
             if vid.get_untracked() != Some(v) {
@@ -143,7 +199,7 @@ pub fn MaterialsPanel(
     // Keep the viewer's draft in sync with the edits.
     Effect::new(move |_| {
         let d = match (preview.get(), baseline.with(|b| b.is_some())) {
-            (Some(p), true) => edit.with(|cfg| compute_draft(&p, cfg, target.get())),
+            (Some(p), true) => edit.with(|cfg| hidden.with(|h| compute_draft(&p, cfg, target.get(), h))),
             _ => None,
         };
         if draft.get_untracked() != d {
@@ -286,6 +342,7 @@ pub fn MaterialsPanel(
         let cfg = edit.get();
         let t = target.get();
         let opened = open.get();
+        let off = hidden.get();
         let needle = filter.get().to_lowercase();
         let writable = can_write.get() && !saving.get();
         let previews: HashMap<String, String> =
@@ -314,17 +371,10 @@ pub fn MaterialsPanel(
                         .unwrap_or_default(),
                     Target::Base => BTreeMap::new(),
                 };
-                // Effective texture per slot for the edited target.
-                let effective = |slot: TextureSlot| -> Option<String> {
-                    if let Some(p) = skin.get(&slot) {
-                        return Some(p.clone());
-                    }
-                    match base.get(&slot) {
-                        Some(v) => v.clone(),
-                        None => baked(m, slot).map(str::to_string),
-                    }
-                };
+                let effective = |slot: TextureSlot| effective(m, &cfg, t, slot);
                 let edits = if t == Target::Base { base.len() } else { skin.len() };
+                let hidden_count =
+                    off.iter().filter(|(mat, slot)| *mat == m.name && effective(*slot).is_some()).count();
                 let is_open = opened.contains(&name);
                 let thumbs: Vec<String> = [TextureSlot::BaseColor, TextureSlot::Normal]
                     .into_iter()
@@ -369,8 +419,21 @@ pub fn MaterialsPanel(
                             let thumb = current.as_ref().and_then(|p| previews.get(p)).map(|h| blob_url(h));
                             let title = current.clone().unwrap_or_else(|| "sem textura".into());
                             let mat = name.clone();
+                            let key = (name.clone(), slot);
+                            let is_off = off.contains(&key);
                             view! {
-                                <div class="mat-slot-row" class:edited=!selected.is_empty()>
+                                <div class="mat-slot-row" class:edited=!selected.is_empty() class:off=is_off>
+                                    <input
+                                        type="checkbox"
+                                        title="Mostrar esta textura na pré-visualização (não é salvo)"
+                                        prop:checked=current.is_some() && !is_off
+                                        disabled=current.is_none()
+                                        on:change=move |_| hidden.update(|h| {
+                                            if !h.remove(&key) {
+                                                h.insert(key.clone());
+                                            }
+                                        })
+                                    />
                                     <span class="slot-name">{slot.label()}</span>
                                     <span class="mat-thumb checker" title=title>
                                         {thumb.map(|src| view! { <img src=src alt="" loading="lazy" /> })}
@@ -406,6 +469,11 @@ pub fn MaterialsPanel(
                             <span class="chev">{if is_open { "▾" } else { "▸" }}</span>
                             <b class="clamp-1">{name.clone()}</b>
                             {(edits > 0).then(|| view! { <span class="pill pill-accent">{format!("{edits} manual")}</span> })}
+                            {(hidden_count > 0).then(|| view! {
+                                <span class="pill pill-outline" title="Texturas ocultas na pré-visualização">
+                                    {format!("{hidden_count} oculta{}", if hidden_count > 1 { "s" } else { "" })}
+                                </span>
+                            })}
                             <span class="mat-mini push-right">
                                 {thumbs.into_iter().map(|h| view! { <img src=blob_url(&h) alt="" /> }).collect_view()}
                             </span>
@@ -497,6 +565,12 @@ pub fn MaterialsPanel(
                         prop:value=move || filter.get()
                         on:input=move |ev| filter.set(event_target_value(&ev))
                     />
+                </Show>
+                <Show when=move || hidden.with(|h| !h.is_empty())>
+                    <div class="mat-hidden-bar">
+                        <span class="muted">"Texturas ocultas só na pré-visualização; nada disso é salvo."</span>
+                        <button class="link-btn" on:click=move |_| hidden.set(HiddenSet::new())>"Mostrar todas"</button>
+                    </div>
                 </Show>
                 {cards}
                 <Show when=move || !can_write.get()>

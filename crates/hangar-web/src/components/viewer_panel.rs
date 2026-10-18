@@ -2,8 +2,8 @@
 
 use crate::api;
 use crate::util::{fmt_bytes, fmt_compact, fmt_int};
-use crate::viewer::{self, CANVAS_ID, VariantTexture, ViewerCommand, ViewerEvent};
-use hangar_core::{LodSource, TextureOverride, VersionDto};
+use crate::viewer::{self, CANVAS_ID, VariantTexture, ViewerCommand, ViewerDraft, ViewerEvent};
+use hangar_core::{LodSource, VersionDto};
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use leptos_bevy_canvas::prelude::*;
@@ -63,10 +63,10 @@ pub fn ViewerPanel(
     /// Selected (ready) version.
     version: Signal<Option<VersionDto>>,
     asset_id: Signal<Uuid>,
-    /// Unsaved texture assignments from the materials panel; while set, they
-    /// replace the selected skin in the viewer.
+    /// Unsaved state of the materials panel; while set, it replaces the
+    /// selected skin in the viewer.
     #[prop(into)]
-    draft: Signal<Option<Vec<TextureOverride>>>,
+    draft: Signal<Option<ViewerDraft>>,
 ) -> impl IntoView {
     let (cmd_tx, cmd_rx) = message_l2b::<ViewerCommand>();
     let (evt_rx, evt_tx) = message_b2l::<ViewerEvent>();
@@ -136,19 +136,19 @@ pub fn ViewerPanel(
     Effect::new(move |_| {
         let cmd_tx = tx.clone();
         let Some(p) = preview.get() else { return };
-        let overrides = match draft.get() {
+        let wanted = match draft.get() {
             Some(d) => Some(d),
             None => variant
                 .get()
                 .and_then(|n| p.variants.into_iter().find(|v| v.name == n))
                 .filter(|v| !v.is_default && !v.overrides.is_empty())
-                .map(|v| v.overrides),
+                .map(|v| ViewerDraft { overrides: v.overrides, hidden: vec![] }),
         };
         // Downloads finish out of order; only the latest request may apply.
         let seq = variant_seq.get_value() + 1;
         variant_seq.set_value(seq);
-        match overrides.filter(|o| !o.is_empty()) {
-            Some(overrides) => {
+        match wanted.filter(|d| !d.overrides.is_empty() || !d.hidden.is_empty()) {
+            Some(ViewerDraft { overrides, hidden }) => {
                 spawn_local(async move {
                     let mut textures = Vec::new();
                     for o in overrides {
@@ -163,7 +163,7 @@ pub fn ViewerPanel(
                         }
                     }
                     if variant_seq.get_value() == seq {
-                        cmd_tx.send(ViewerCommand::ApplyVariant { textures }).ok();
+                        cmd_tx.send(ViewerCommand::ApplyVariant { textures, hidden }).ok();
                     }
                 });
             }

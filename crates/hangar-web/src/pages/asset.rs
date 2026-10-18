@@ -9,7 +9,8 @@ use crate::components::materials::MaterialsPanel;
 use crate::components::new_version::NewVersionDialog;
 use crate::components::stage::Stage;
 use crate::components::versions::VersionTimeline;
-use hangar_core::{AssetDetail, TextureOverride, UpdateAssetRequest, VersionDto, VersionStatus};
+use crate::viewer::ViewerDraft;
+use hangar_core::{AssetDetail, UpdateAssetRequest, VersionDto, VersionStatus};
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use leptos_router::components::A;
@@ -115,8 +116,8 @@ pub fn AssetPage() -> impl IntoView {
     });
 
     let tab = RwSignal::new(Tab::Versions);
-    // Unsaved texture assignments of the materials tab, previewed by the viewer.
-    let draft = RwSignal::new(None::<Vec<TextureOverride>>);
+    // Unsaved state of the materials tab, previewed by the viewer.
+    let draft = RwSignal::new(None::<ViewerDraft>);
     let draft_sig = Signal::derive(move || draft.get());
     let on_material_commit = Callback::new(move |v: VersionDto| {
         selected.set(Some(v.id));

@@ -482,11 +482,18 @@ select { appearance: none; background-image: linear-gradient(45deg, transparent 
 .mat-mini { display: flex; gap: 3px; flex-shrink: 0; }
 .mat-mini img { width: 20px; height: 20px; border-radius: 3px; object-fit: cover; border: 1px solid var(--line); }
 .mat-slot-row {
-  display: grid; grid-template-columns: 74px 30px minmax(0, 1fr); gap: 8px; align-items: center;
+  display: grid; grid-template-columns: 15px 70px 30px minmax(0, 1fr); gap: 8px; align-items: center;
   padding: 3px 10px; font-size: 12px;
 }
+.mat-slot-row input[type="checkbox"]:disabled { opacity: 0.25; }
 .mat-slot-row .slot-name { color: var(--muted); }
 .mat-slot-row.edited .slot-name { color: var(--info); }
+.mat-slot-row.off .slot-name { text-decoration: line-through; }
+.mat-slot-row.off .mat-thumb { opacity: 0.25; filter: grayscale(1); }
+.mat-hidden-bar {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 11.5px;
+  padding: 6px 10px; border: 1px dashed var(--line-2); border-radius: var(--radius);
+}
 .mat-slot-row select { height: 30px; font-size: 12px; padding-top: 0; padding-bottom: 0; min-width: 0; width: 100%; }
 .mat-thumb { width: 30px; height: 30px; border-radius: 4px; overflow: hidden; border: 1px solid var(--line); display: block; }
 .mat-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }

@@ -26,8 +26,9 @@ pub enum ViewerCommand {
     LoadModel { key: String, asset: String, bytes: Arc<Vec<u8>> },
     /// Remove the model.
     Clear,
-    /// Override textures by material name (a skin / texture variant).
-    ApplyVariant { textures: Vec<VariantTexture> },
+    /// Override textures by material name (a skin / texture variant), and hide
+    /// some textures entirely (preview toggles of the materials panel).
+    ApplyVariant { textures: Vec<VariantTexture>, hidden: Vec<HiddenTexture> },
     /// Restore the textures baked into the GLB.
     ResetVariant,
     SetWireframe(bool),
@@ -44,6 +45,24 @@ pub struct VariantTexture {
     /// File extension of `bytes` ("png", "jpg").
     pub ext: String,
     pub bytes: Arc<Vec<u8>>,
+}
+
+/// A texture switched off in the viewer only. The factors are the material's
+/// source values (the GLB has them replaced by 1.0 where a texture is baked).
+#[derive(Clone, Debug, PartialEq)]
+pub struct HiddenTexture {
+    pub material: String,
+    pub slot: TextureSlot,
+    pub alpha: f32,
+    pub metallic: f32,
+    pub roughness: f32,
+}
+
+/// Unsaved state of the materials panel, previewed instead of the selected skin.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ViewerDraft {
+    pub overrides: Vec<hangar_core::TextureOverride>,
+    pub hidden: Vec<HiddenTexture>,
 }
 
 /// Bevy → Leptos.

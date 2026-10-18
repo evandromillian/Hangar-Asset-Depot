@@ -2,7 +2,7 @@
 //! StandardMaterials by material name, mirroring what the pipeline bakes.
 
 use super::model::ModelState;
-use super::{ViewerCommand, ViewerEvent};
+use super::{HiddenTexture, ViewerCommand, ViewerEvent};
 use bevy::asset::RenderAssetUsages;
 use bevy::gltf::GltfMaterialName;
 use bevy::image::{CompressedImageFormats, ImageSampler, ImageType};
@@ -57,6 +57,8 @@ impl OriginalMaterial {
 pub struct VariantState {
     /// (material name, slot, decoded image) of the active variant; empty = default.
     active: Vec<(String, TextureSlot, Handle<Image>)>,
+    /// Textures switched off by the materials panel.
+    hidden: Vec<HiddenTexture>,
     originals: HashMap<AssetId<StandardMaterial>, OriginalMaterial>,
     /// Metal/rough maps packed from separate roughness / metallic overrides,
     /// kept alive while applied.
@@ -74,7 +76,7 @@ pub fn handle_variant_commands(
 ) {
     for cmd in reader.read() {
         match cmd {
-            ViewerCommand::ApplyVariant { textures } => {
+            ViewerCommand::ApplyVariant { textures, hidden } => {
                 let mut active = Vec::new();
                 for t in textures {
                     let ext = if t.ext.is_empty() { "png" } else { t.ext.as_str() };
@@ -96,10 +98,12 @@ pub fn handle_variant_commands(
                     }
                 }
                 state.active = active;
+                state.hidden = hidden.clone();
                 state.dirty = true;
             }
             ViewerCommand::ResetVariant => {
                 state.active.clear();
+                state.hidden.clear();
                 state.dirty = true;
             }
             _ => {}
@@ -134,7 +138,13 @@ pub fn apply_pending_variant(
         let original = state.originals.entry(id).or_insert_with(|| OriginalMaterial::of(&material)).clone();
         // Start from the originals, then layer the variant on top.
         original.restore(&mut material);
+        let hidden = |slot: TextureSlot| {
+            state.hidden.iter().find(|h| h.slot == slot && h.material.eq_ignore_ascii_case(&name.0))
+        };
         let ours = |slot: TextureSlot| {
+            if hidden(slot).is_some() {
+                return None;
+            }
             state
                 .active
                 .iter()
@@ -148,6 +158,23 @@ pub fn apply_pending_variant(
         }
         if let Some(h) = ours(TextureSlot::Normal) {
             material.normal_map_texture = Some(h);
+        }
+        // Hiding any map of the metal/rough family invalidates the baked metal/rough
+        // texture: drop it and rebuild from the visible maps (the materials panel
+        // sends all of them), over the material's source factors.
+        let family = [TextureSlot::Orm, TextureSlot::MetallicRoughness, TextureSlot::Roughness, TextureSlot::Metallic];
+        let family_hidden = family.iter().find_map(|s| hidden(*s)).cloned();
+        let (rough_factor, metal_factor) = match &family_hidden {
+            Some(h) => (h.roughness, h.metallic),
+            None => (original.roughness, original.metallic),
+        };
+        if family_hidden.is_some() {
+            material.metallic_roughness_texture = None;
+            material.metallic = metal_factor;
+            material.perceptual_roughness = rough_factor;
+            if hidden(TextureSlot::Orm).is_some() {
+                material.occlusion_texture = None;
+            }
         }
         if let Some(h) = ours(TextureSlot::Orm) {
             material.metallic_roughness_texture = Some(h.clone());
@@ -163,8 +190,8 @@ pub fn apply_pending_variant(
                 let packed = pack_metal_rough(
                     r.and_then(|h| images.get(&h)),
                     m.and_then(|h| images.get(&h)),
-                    original.roughness,
-                    original.metallic,
+                    rough_factor,
+                    metal_factor,
                 )?;
                 let h = images.add(packed);
                 state.packed.push(h.clone());
@@ -183,9 +210,30 @@ pub fn apply_pending_variant(
             material.emissive_texture = Some(h);
             material.emissive = LinearRgba::WHITE;
         }
+        hide_textures(&mut material, |slot| hidden(slot).cloned());
     }
     state.dirty = false;
     state.applied_generation = Some(model.generation);
+}
+
+/// Removes switched-off textures outside the metal/rough family (handled
+/// above). A hidden base colour shows neutral grey rather than the source
+/// factor, which in FBX files is often black once a map is connected.
+fn hide_textures(material: &mut StandardMaterial, hidden: impl Fn(TextureSlot) -> Option<HiddenTexture>) {
+    if let Some(h) = hidden(TextureSlot::BaseColor) {
+        material.base_color_texture = None;
+        material.base_color = Color::srgba(0.72, 0.72, 0.72, h.alpha);
+    }
+    if hidden(TextureSlot::Normal).is_some() {
+        material.normal_map_texture = None;
+    }
+    if hidden(TextureSlot::Occlusion).is_some() {
+        material.occlusion_texture = None;
+    }
+    if hidden(TextureSlot::Emissive).is_some() {
+        material.emissive_texture = None;
+        material.emissive = LinearRgba::BLACK;
+    }
 }
 
 /// Packs grey-scale roughness / metallic maps into a glTF metal/rough texture
