@@ -56,8 +56,21 @@ pub fn Stage(
     // Only re-render the stage when the *kind* of preview changes, so the Bevy
     // canvas survives switching between versions / LODs of the same asset.
     let mode = Memo::new(move |_| mode_of(&version.get()));
+    // The version has a model, but the pipeline fell back to its images / audio.
+    let model_error = Memo::new(move |_| version.get().and_then(|v| v.preview).and_then(|p| p.model_error));
+    let banner = move || {
+        model_error.get().filter(|_| matches!(mode.get(), Mode::Image | Mode::Audio | Mode::NoPreview)).map(|e| {
+            view! {
+                <div class="banner banner-error stage-banner" role="alert">
+                    <b>"O modelo 3D não pôde ser aberto"</b>
+                    " — mostrando os outros arquivos da versão. "
+                    <span class="mono">{e}</span>
+                </div>
+            }
+        })
+    };
 
-    move || match mode.get() {
+    let stage = move || match mode.get() {
         Mode::Model => view! { <ViewerPanel version=version asset_id=asset_id draft=draft /> }.into_any(),
         Mode::Image => view! { <TextureGallery version=version /> }.into_any(),
         Mode::Unbound => view! {
@@ -144,7 +157,8 @@ pub fn Stage(
             </div>
         }
         .into_any(),
-    }
+    };
+    view! { {banner} {stage} }
 }
 
 #[component]

@@ -82,7 +82,11 @@ relevantes (modelos, imagens, áudio) para um diretório temporário e chama
    `mixamorig:Hips` ↔ `Hips`); takes com nome genérico ("Take 001", "mixamo.com") recebem o
    nome do arquivo (`Shark@Swim.fbx` → "Swim"). Uma versão **só com animações** (nenhum
    FBX com malha) vira `kind: animation`: ver *Esqueletos de referência* abaixo.
-2. **Importação** — `ufbx` (FBX, normaliza para Y-up/metros), `gltf` e `tobj`.
+2. **Importação** — `ufbx` (FBX, normaliza para Y-up/metros), `gltf` e `tobj`. Materiais
+   glTF no modelo antigo `KHR_materials_pbrSpecularGlossiness` (ex.: Microsoft glTF
+   Exporter) viram metal/rough: difusa → base color, rugosidade = 1 − glossiness (o alfa da
+   textura specular-glossiness vira um mapa de rugosidade), metálico 0. Se o modelo não abre,
+   a versão cai para a pré-visualização das imagens e `model_error` explica o motivo no palco.
    Formatos não suportados nativamente (ex.: `.blend`) ou falhas caem no **fallback do
    Blender headless** (`tools/blender/export_glb.py`), quando configurado.
 3. **Resolução de texturas** — FBX comprados costumam apontar para `C:\Users\artista\...`.
@@ -98,10 +102,12 @@ relevantes (modelos, imagens, áudio) para um diretório temporário e chama
    Skins manuais de `.hangar/materials.json` entram com `detected_by: "manual"`.
 5. **LODs** — autorais (por nome) ou gerados com `meshopt::simplify` (50% / 25% / 10% por
    padrão), cada um exportado como **GLB autocontido** com texturas reduzidas.
-   **Animação (FBX):** quando algum take realmente se move (o "Take 001" vazio que quase
-   todo exportador grava é ignorado), cada take é amostrado na taxa de quadros do arquivo
-   com `ufbx::bake_anim` e o GLB ganha a hierarquia de nós (sob um nó raiz único), as skins
-   (até 4 ossos por vértice) e os clipes. As malhas continuam em espaço de mundo no resto do
+   **Animação (FBX e glTF/GLB):** no FBX, quando algum take realmente se move (o "Take 001"
+   vazio que quase todo exportador grava é ignorado), cada take é amostrado na taxa de
+   quadros do arquivo com `ufbx::bake_anim`; no glTF as animações são lidas direto (STEP e
+   CUBICSPLINE viram chaves lineares; pesos de morph targets não são exportados). O GLB
+   ganha a hierarquia de nós (sob um nó raiz único), as skins (até 4 ossos por vértice) e os
+   clipes; chaves que a interpolação reproduz (0,1 mm / ~0,01°) são descartadas. As malhas continuam em espaço de mundo no resto do
    pipeline; o writer do GLB leva as partes rígidas para o espaço do seu nó. O manifesto
    lista os clipes em `animations` (nome, duração, fps, quadros e, para clipes de arquivos
    separados, `source`).

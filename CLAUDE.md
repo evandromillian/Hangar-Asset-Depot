@@ -113,8 +113,10 @@ prepared statements. Add `?sslmode=require`.
   (`hangar_core::MaterialConfig`): base slot assignments override automatic resolution, skins become
   `detected_by: "manual"` variants. The web "Materiais" tab edits it and commits a new version; the
   viewer's live preview must mirror the GLB export's factor rules (`viewer/variants.rs`).
-- Meshes (`MeshPrim`) are always world-space rest pose. An animated FBX additionally yields a
-  `scene::Rig` (hierarchy, skins, baked clips); only `glb::write_glb` uses it, moving rigid parts into
+- Meshes (`MeshPrim`) are always world-space rest pose. An animated FBX or glTF/GLB additionally
+  yields a `scene::Rig` (hierarchy, skins, baked clips; glTF skinned vertices are mapped from bind
+  space by joint world × inverse bind, and the rig's inverse binds compensate, so playback is exact;
+  STEP / CUBICSPLINE samplers are converted to linear keys); only `glb::write_glb` uses it, moving rigid parts into
   their node's space and writing everything under a single root node (Bevy's animation root).
   The manifest's `animations` must stay in GLB clip order — the viewer loads `#AnimationN` by index.
   Other FBX files of the version whose takes move are animation sources for an FBX primary
@@ -164,8 +166,10 @@ prepared statements. Add `?sslmode=require`.
 
 - Skeleton GLBs are baked per animation version (copy of the mesh each); a new skeleton
   version only applies after `POST /api/skeletons/{id}/reprocess`.
-- No DDS/PSD/EXR texture previews. Animation is exported for FBX only (node + skeletal, no morph
-  targets); glTF/OBJ sources are still flattened, and their animations are not exported.
+- No DDS/PSD/EXR texture previews. Animation is exported for FBX and glTF/GLB (node + skeletal, no
+  morph targets); OBJ is static. Separate animation files and reference skeletons are FBX only.
+- `glb::clean_keys` drops keys that interpolation reproduces (0.1 mm / ~0.01°); clips are still
+  repeated in every LOD GLB.
 - Blender fallback is implemented but was never run against a real Blender in CI.
 - The S3 storage backend is compiled in but only the `fs` backend has been exercised end-to-end.
 - Sessions are in memory by default (`--features redis-sessions` for Redis); blob downloads by hash

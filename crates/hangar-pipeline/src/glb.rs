@@ -212,9 +212,10 @@ pub fn write_glb(meshes: &[MeshPrim], materials: &[GlbMaterial], images: &[Encod
                 for ch in clip.channels.iter().filter(|c| c.node < rig.nodes.len()) {
                     let target = rig_index(ch.node);
                     let paths = [
-                        ("translation", sampler(&mut b, &ch.translation)),
-                        ("rotation", sampler(&mut b, &ch.rotation)),
-                        ("scale", sampler(&mut b, &ch.scale)),
+                        // Tolerances: 0.1 mm, ~0.01°, 0.01 %.
+                        ("translation", sampler(&mut b, &ch.translation, Interp::Lerp, 1e-4)),
+                        ("rotation", sampler(&mut b, &ch.rotation, Interp::Slerp, 1e-4)),
+                        ("scale", sampler(&mut b, &ch.scale, Interp::Lerp, 1e-4)),
                     ];
                     for (path, s) in paths {
                         if let Some((input, output)) = s {
@@ -331,12 +332,31 @@ fn localize(m: &MeshPrim, node: &SceneNode) -> (Vec<[f32; 3]>, Vec<[f32; 3]>) {
     (positions, normals)
 }
 
+/// How a sampler's values are interpolated (what the viewer will do between keys).
+#[derive(Clone, Copy)]
+enum Interp {
+    Lerp,
+    Slerp,
+}
+
+fn interpolate<const N: usize>(a: &[f32; N], b: &[f32; N], f: f32, how: Interp) -> [f32; N] {
+    match how {
+        Interp::Slerp if N == 4 => {
+            let q = glam::Quat::from_slice(a).normalize().slerp(glam::Quat::from_slice(b).normalize(), f).to_array();
+            std::array::from_fn(|i| q[i])
+        }
+        _ => std::array::from_fn(|i| a[i] + (b[i] - a[i]) * f),
+    }
+}
+
 /// Keys ready for a glTF sampler: repeated times keep the last value (glTF
-/// needs strictly increasing input), and a channel that never changes becomes
-/// its first and last key. Exporters such as Unreal key every bone on every
-/// frame, so this keeps GLBs of big animation packages small. The channel is
-/// kept (not dropped) so a clip still overrides what the previous one left.
-fn clean_keys<const N: usize>(keys: &[(f32, [f32; N])]) -> Vec<(f32, [f32; N])> {
+/// needs strictly increasing input), and keys that interpolating their
+/// neighbours reproduces within `eps` are dropped. Baked clips (FBX takes,
+/// Unreal exports, glTF from most tools) key every bone on every frame, so this
+/// keeps GLBs small; a channel that never changes ends up as its first and
+/// last key. Channels are kept (not dropped) so a clip still overrides what the
+/// previous one left.
+fn clean_keys<const N: usize>(keys: &[(f32, [f32; N])], how: Interp, eps: f32) -> Vec<(f32, [f32; N])> {
     let mut clean: Vec<(f32, [f32; N])> = Vec::with_capacity(keys.len());
     for &(t, v) in keys {
         match clean.last_mut() {
@@ -344,19 +364,34 @@ fn clean_keys<const N: usize>(keys: &[(f32, [f32; N])]) -> Vec<(f32, [f32; N])> 
             _ => clean.push((t, v)),
         }
     }
-    if let (Some(&first), Some(&last)) = (clean.first(), clean.last())
-        && clean.len() > 2
-        && clean.iter().all(|k| k.1.iter().zip(&first.1).all(|(a, b)| (a - b).abs() <= 1e-6))
-    {
-        return vec![first, (last.0, first.1)];
+    if clean.len() <= 2 {
+        return clean;
     }
-    clean
+    let reproduces = |from: usize, to: usize| {
+        let (a, b) = (clean[from], clean[to]);
+        (from + 1..to).all(|k| {
+            let f = (clean[k].0 - a.0) / (b.0 - a.0);
+            let v = interpolate(&a.1, &b.1, f, how);
+            v.iter().zip(&clean[k].1).all(|(x, y)| (x - y).abs() <= eps)
+        })
+    };
+    let mut out = vec![clean[0]];
+    let mut kept = 0;
+    while kept < clean.len() - 1 {
+        let mut end = kept + 1;
+        while end + 1 < clean.len() && reproduces(kept, end + 1) {
+            end += 1;
+        }
+        out.push(clean[end]);
+        kept = end;
+    }
+    out
 }
 
 /// Writes one animation sampler (input times + output values); None for an
 /// empty channel.
-fn sampler<const N: usize>(b: &mut Builder, keys: &[(f32, [f32; N])]) -> Option<(usize, usize)> {
-    let clean = clean_keys(keys);
+fn sampler<const N: usize>(b: &mut Builder, keys: &[(f32, [f32; N])], how: Interp, eps: f32) -> Option<(usize, usize)> {
+    let clean = clean_keys(keys, how, eps);
     let (first, last) = (clean.first()?.0, clean.last()?.0);
     let times: Vec<[f32; 1]> = clean.iter().map(|k| [k.0]).collect();
     let values: Vec<[f32; N]> = clean.iter().map(|k| k.1).collect();
@@ -374,9 +409,32 @@ mod tests {
     #[test]
     fn constant_channels_shrink_to_two_keys() {
         let still: Vec<(f32, [f32; 3])> = (0..30).map(|i| (i as f32 / 30.0, [0.0, 1.0, 0.0])).collect();
-        assert_eq!(clean_keys(&still), vec![(0.0, [0.0, 1.0, 0.0]), (29.0 / 30.0, [0.0, 1.0, 0.0])]);
+        assert_eq!(clean_keys(&still, Interp::Lerp, 1e-4), vec![(0.0, [0.0, 1.0, 0.0]), (29.0 / 30.0, [0.0, 1.0, 0.0])]);
         let moving = [(0.0, [0.0; 3]), (0.5, [1.0, 0.0, 0.0]), (0.5, [2.0, 0.0, 0.0]), (1.0, [0.0; 3])];
-        assert_eq!(clean_keys(&moving), vec![(0.0, [0.0; 3]), (0.5, [2.0, 0.0, 0.0]), (1.0, [0.0; 3])]);
+        assert_eq!(clean_keys(&moving, Interp::Lerp, 1e-4), vec![(0.0, [0.0; 3]), (0.5, [2.0, 0.0, 0.0]), (1.0, [0.0; 3])]);
+    }
+
+    /// Keys baked from linear motion collapse to the ends; a curve keeps what
+    /// it needs to stay within the tolerance.
+    #[test]
+    fn redundant_keys_are_reduced() {
+        let line: Vec<(f32, [f32; 3])> = (0..=30).map(|i| (i as f32 / 30.0, [i as f32 * 0.1, 0.0, 0.0])).collect();
+        assert_eq!(clean_keys(&line, Interp::Lerp, 1e-4).len(), 2);
+
+        // Constant-speed spin: slerp between the ends reproduces every key.
+        let spin: Vec<(f32, [f32; 4])> =
+            (0..=30).map(|i| (i as f32 / 30.0, glam::Quat::from_rotation_y(i as f32 / 30.0 * 1.5).to_array())).collect();
+        assert_eq!(clean_keys(&spin, Interp::Slerp, 1e-4).len(), 2);
+
+        let wave: Vec<(f32, [f32; 3])> = (0..=60).map(|i| (i as f32 / 60.0, [(i as f32 / 60.0 * std::f32::consts::TAU).sin(), 0.0, 0.0])).collect();
+        let reduced = clean_keys(&wave, Interp::Lerp, 1e-3);
+        assert!(reduced.len() > 4 && reduced.len() < wave.len(), "{}", reduced.len());
+        for (t, v) in &wave {
+            let i = reduced.partition_point(|k| k.0 <= *t).clamp(1, reduced.len() - 1);
+            let (a, b) = (reduced[i - 1], reduced[i]);
+            let x = interpolate(&a.1, &b.1, (t - a.0) / (b.0 - a.0), Interp::Lerp)[0];
+            assert!((x - v[0]).abs() <= 1e-3 + 1e-6, "t={t}: {x} vs {}", v[0]);
+        }
     }
 
     #[test]

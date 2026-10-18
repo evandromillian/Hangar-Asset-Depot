@@ -167,6 +167,7 @@ pub fn run(input: &ProcessInput, cfg: &PipelineConfig) -> Result<ProcessOutput> 
                     return Err(e.context(format!("model {}", sel.primary)));
                 }
                 warnings.insert(0, format!("3D preview unavailable for {}: {e:#}", sel.primary));
+                manifest.model_error = Some(format!("{}: {e:#}", sel.primary));
             }
         }
     } else if !anim_only.is_empty() {

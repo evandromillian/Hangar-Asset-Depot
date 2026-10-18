@@ -43,6 +43,10 @@ pub struct PreviewManifest {
     pub audio: Option<AudioInfo>,
     /// PNG thumbnail (software rendered for models, downscaled for images).
     pub thumbnail_hash: Option<String>,
+    /// Why the version's model could not be previewed when the pipeline fell
+    /// back to its images / audio (shown on the stage, not just in warnings).
+    #[serde(default)]
+    pub model_error: Option<String>,
     /// Non fatal issues found while processing (missing textures, fallbacks, ...).
     #[serde(default)]
     pub warnings: Vec<String>,

@@ -15,7 +15,7 @@ tracing.workspace = true
 blake3.workspace = true
 
 ufbx = "0.10"
-gltf = { version = "1.4", default-features = false, features = ["import", "utils", "names", "extras", "KHR_materials_emissive_strength", "KHR_texture_transform"] }
+gltf = { version = "1.4", default-features = false, features = ["import", "utils", "names", "extras", "KHR_materials_emissive_strength", "KHR_materials_pbrSpecularGlossiness", "KHR_texture_transform"] }
 tobj = "4"
 meshopt = "0.7"
 glam = "0.30"

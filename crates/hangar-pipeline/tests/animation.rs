@@ -427,3 +427,180 @@ fn animation_package_with_a_prop_plays_on_the_skeleton() {
     let g = gltf::Gltf::from_slice(&glb.bytes).unwrap();
     assert_eq!(g.document.animations().count(), 2);
 }
+
+/// Binary buffer + accessors for a hand-written glTF.
+#[derive(Default)]
+struct GltfBin {
+    bin: Vec<u8>,
+    views: Vec<String>,
+    accessors: Vec<String>,
+}
+
+impl GltfBin {
+    /// Appends little-endian data and returns the accessor index.
+    fn add(&mut self, bytes: Vec<u8>, component: u32, count: usize, ty: &str, minmax: Option<(&str, &str)>) -> usize {
+        while self.bin.len() % 4 != 0 {
+            self.bin.push(0);
+        }
+        self.views.push(format!(r#"{{"buffer":0,"byteOffset":{},"byteLength":{}}}"#, self.bin.len(), bytes.len()));
+        self.bin.extend(bytes);
+        let mm = minmax.map(|(a, b)| format!(r#","min":{a},"max":{b}"#)).unwrap_or_default();
+        self.accessors.push(format!(
+            r#"{{"bufferView":{},"componentType":{component},"count":{count},"type":"{ty}"{mm}}}"#,
+            self.views.len() - 1
+        ));
+        self.accessors.len() - 1
+    }
+    fn f32s(&mut self, v: &[f32], count: usize, ty: &str, minmax: Option<(&str, &str)>) -> usize {
+        self.add(v.iter().flat_map(|f| f.to_le_bytes()).collect(), 5126, count, ty, minmax)
+    }
+    fn u16s(&mut self, v: &[u16], count: usize, ty: &str) -> usize {
+        self.add(v.iter().flat_map(|f| f.to_le_bytes()).collect(), 5123, count, ty, None)
+    }
+}
+
+/// Skinned glTF exported in centimetres under a scaled armature (like Blender
+/// / Unity exports), plus a rigid box: a CUBICSPLINE clip bends Bone1 45°
+/// around Z and a STEP clip makes the box hop. The GLB must keep the rig,
+/// skin and both clips, with the rest pose in metres.
+#[test]
+fn gltf_animations_are_exported() {
+    let mut b = GltfBin::default();
+    let strip_pos = b.f32s(
+        &[-10.0, 0.0, 0.0, 10.0, 0.0, 0.0, -10.0, 100.0, 0.0, 10.0, 100.0, 0.0, -10.0, 200.0, 0.0, 10.0, 200.0, 0.0],
+        6,
+        "VEC3",
+        Some(("[-10,0,0]", "[10,200,0]")),
+    );
+    let strip_idx = b.u16s(&[0, 1, 3, 0, 3, 2, 2, 3, 5, 2, 5, 4], 12, "SCALAR");
+    let joints = b.u16s(&[0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0], 6, "VEC4");
+    let weights = b.f32s(
+        &[1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.5, 0.5, 0.0, 0.0, 0.5, 0.5, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
+        6,
+        "VEC4",
+        None,
+    );
+    // inverse(joint world) × armature world: identity and a 1 m (100 cm) drop.
+    let ibm = b.f32s(
+        &[
+            1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, //
+            1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, -100.0, 0.0, 1.0,
+        ],
+        2,
+        "MAT4",
+        None,
+    );
+    let box_pos = b.f32s(&[0.0, 0.0, 0.0, 0.5, 0.0, 0.0, 0.0, 0.5, 0.0], 3, "VEC3", Some(("[0,0,0]", "[0.5,0.5,0]")));
+    let bend_t = b.f32s(&[0.0, 1.0], 2, "SCALAR", Some(("[0]", "[1]")));
+    let q = Quat::from_rotation_z(45f32.to_radians());
+    #[rustfmt::skip]
+    let bend_v = b.f32s(
+        &[0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0,
+          0.0, 0.0, 0.0, 0.0, q.x, q.y, q.z, q.w, 0.0, 0.0, 0.0, 0.0],
+        6,
+        "VEC4",
+        None,
+    );
+    let hop_t = b.f32s(&[0.0, 0.5, 1.0], 3, "SCALAR", Some(("[0]", "[1]")));
+    let hop_v = b.f32s(&[2.0, 0.0, 0.0, 2.0, 1.0, 0.0, 2.0, 0.0, 0.0], 3, "VEC3", None);
+
+    let gltf = format!(
+        r#"{{
+  "asset": {{ "version": "2.0" }},
+  "scene": 0, "scenes": [{{ "nodes": [0, 4] }}],
+  "nodes": [
+    {{ "name": "Armature", "scale": [0.01, 0.01, 0.01], "children": [1, 3] }},
+    {{ "name": "Bone0", "children": [2] }},
+    {{ "name": "Bone1", "translation": [0, 100, 0] }},
+    {{ "name": "Strip", "mesh": 0, "skin": 0 }},
+    {{ "name": "Box", "mesh": 1, "translation": [2, 0, 0] }}
+  ],
+  "meshes": [
+    {{ "primitives": [{{ "attributes": {{ "POSITION": {strip_pos}, "JOINTS_0": {joints}, "WEIGHTS_0": {weights} }}, "indices": {strip_idx} }}] }},
+    {{ "primitives": [{{ "attributes": {{ "POSITION": {box_pos} }} }}] }}
+  ],
+  "skins": [{{ "joints": [1, 2], "inverseBindMatrices": {ibm} }}],
+  "animations": [
+    {{ "name": "Bend", "samplers": [{{ "input": {bend_t}, "output": {bend_v}, "interpolation": "CUBICSPLINE" }}],
+       "channels": [{{ "sampler": 0, "target": {{ "node": 2, "path": "rotation" }} }}] }},
+    {{ "name": "Hop", "samplers": [{{ "input": {hop_t}, "output": {hop_v}, "interpolation": "STEP" }}],
+       "channels": [{{ "sampler": 0, "target": {{ "node": 4, "path": "translation" }} }}] }}
+  ],
+  "buffers": [{{ "uri": "Rig.bin", "byteLength": {len} }}],
+  "bufferViews": [{views}],
+  "accessors": [{accessors}]
+}}"#,
+        len = b.bin.len(),
+        views = b.views.join(","),
+        accessors = b.accessors.join(","),
+    );
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("Rig.bin"), &b.bin).unwrap();
+    std::fs::write(dir.path().join("Rig.gltf"), gltf).unwrap();
+    let files: Vec<FileEntry> =
+        ["Rig.gltf", "Rig.bin"].iter().map(|p| FileEntry { path: p.to_string(), hash: String::new(), size: 1 }).collect();
+    let res = process(&ProcessInput { root: dir.path(), files: &files, skeletons: &[] }, &PipelineConfig::default()).expect("pipeline");
+    let m = &res.manifest;
+    assert!(m.warnings.is_empty(), "warnings: {:?}", m.warnings);
+    assert_eq!(m.animations.iter().map(|a| a.name.as_str()).collect::<Vec<_>>(), ["Bend", "Hop"]);
+    assert!((m.animations[0].duration_secs - 1.0).abs() < 1e-4 && m.animations[0].fps == 30.0);
+    let stats = m.stats.as_ref().unwrap();
+    assert!(stats.has_skin && stats.animations == 2);
+    // Centimetres under the 0.01 armature: the strip is 2 m tall, the box ends at x = 2.5.
+    assert!((stats.bounds_max[1] - 2.0).abs() < 1e-4 && (stats.bounds_max[0] - 2.5).abs() < 1e-4, "{:?}", stats.bounds_max);
+
+    let glb = res.artifacts.iter().find(|a| a.role == ArtifactRole::LodGlb(0)).unwrap();
+    let g = gltf::Gltf::from_slice(&glb.bytes).unwrap();
+    let buffers = gltf::import_buffers(&g.document, None, g.blob.clone()).unwrap();
+    let doc = &g.document;
+    assert_eq!(doc.default_scene().unwrap().nodes().count(), 1, "single animation root");
+    assert_eq!(doc.animations().count(), 2);
+    let skin = doc.skins().next().expect("skin");
+    assert_eq!(skin.joints().map(|j| j.name().unwrap_or("")).collect::<Vec<_>>(), ["Bone0", "Bone1"]);
+
+    // Rest pose rebuilt from the GLB equals the world-space geometry (metres).
+    let world = world_matrices(doc);
+    let ibm: Vec<Mat4> = skin
+        .reader(|b| Some(&buffers[b.index()]))
+        .read_inverse_bind_matrices()
+        .unwrap()
+        .map(|m| Mat4::from_cols_array_2d(&m))
+        .collect();
+    let joints_world: Vec<Mat4> = skin.joints().map(|j| world[j.index()]).collect();
+    let mut top = f32::MIN;
+    for node in doc.nodes().filter(|n| n.skin().is_some()) {
+        for prim in node.mesh().unwrap().primitives() {
+            let r = prim.reader(|b| Some(&buffers[b.index()]));
+            let joints: Vec<[u16; 4]> = r.read_joints(0).unwrap().into_u16().collect();
+            let weights: Vec<[f32; 4]> = r.read_weights(0).unwrap().into_f32().collect();
+            for (p, (j, w)) in r.read_positions().unwrap().map(Vec3::from).zip(joints.iter().zip(&weights)) {
+                let skinned: Vec3 = (0..4).map(|k| (joints_world[j[k] as usize] * ibm[j[k] as usize]).transform_point3(p) * w[k]).sum();
+                assert!(skinned.distance(p) < 1e-4, "rest pose must equal bind pose: {skinned} vs {p}");
+                top = top.max(skinned.y);
+            }
+        }
+    }
+    assert!((top - 2.0).abs() < 1e-4, "strip top {top}");
+
+    let anim = |name: &str| doc.animations().find(|a| a.name() == Some(name)).unwrap();
+    // CUBICSPLINE: sampled, ends at 45° around Z.
+    let bend = anim("Bend").channels().next().unwrap();
+    assert_eq!(bend.target().node().name(), Some("Bone1"));
+    let rotations: Vec<Quat> = match bend.reader(|b| Some(&buffers[b.index()])).read_outputs().unwrap() {
+        gltf::animation::util::ReadOutputs::Rotations(r) => r.into_f32().map(Quat::from_array).collect(),
+        _ => unreachable!(),
+    };
+    assert!(rotations.len() > 2, "cubic spline sampled into linear keys");
+    assert!(rotations.last().unwrap().angle_between(q) < 1e-3);
+    // STEP: holds until 0.5 s, then jumps.
+    let hop = anim("Hop").channels().next().unwrap();
+    let r = hop.reader(|b| Some(&buffers[b.index()]));
+    let times: Vec<f32> = r.read_inputs().unwrap().collect();
+    let values: Vec<[f32; 3]> = match r.read_outputs().unwrap() {
+        gltf::animation::util::ReadOutputs::Translations(t) => t.collect(),
+        _ => unreachable!(),
+    };
+    let at = |t: f32| values[times.iter().position(|x| (x - t).abs() < 1e-5).unwrap_or_else(|| panic!("no key at {t}: {times:?}"))];
+    assert_eq!(at(0.499), [2.0, 0.0, 0.0]);
+    assert_eq!(at(0.5), [2.0, 1.0, 0.0]);
+}

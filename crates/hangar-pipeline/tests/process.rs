@@ -364,3 +364,70 @@ fn authored_lod_meshes_by_name() {
     assert_eq!(m.lods[0].triangles, 6 * 10 * 10 * 2 + 12);
     assert_eq!(m.lods[1].triangles, 6 * 3 * 3 * 2 + 12);
 }
+
+/// glTF using the (archived) KHR_materials_pbrSpecularGlossiness extension as
+/// *required*, as Microsoft's exporter writes it: must import (it used to fail
+/// validation, so the version fell back to showing a texture), with the diffuse
+/// map as base color and the glossiness (alpha) turned into a roughness map.
+#[test]
+fn gltf_with_specular_glossiness_material() {
+    let dir = tempfile::tempdir().unwrap();
+    let positions: [f32; 9] = [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+    let uvs: [f32; 6] = [0.0, 0.0, 1.0, 0.0, 0.0, 1.0];
+    let bin: Vec<u8> = positions.iter().chain(&uvs).flat_map(|f| f.to_le_bytes()).collect();
+    std::fs::write(dir.path().join("Wyvern.bin"), &bin).unwrap();
+    let diffuse = image::RgbaImage::from_pixel(4, 4, image::Rgba([200, 40, 40, 255]));
+    diffuse.save(dir.path().join("Wyvern_diffuse.png")).unwrap();
+    // Glossiness 0.75 everywhere (alpha 191) → roughness ≈ 0.25.
+    let specgloss = image::RgbaImage::from_pixel(4, 4, image::Rgba([60, 60, 60, 191]));
+    specgloss.save(dir.path().join("Wyvern_specgloss.png")).unwrap();
+    let gltf = format!(
+        r#"{{
+  "asset": {{ "version": "2.0", "generator": "Microsoft GLTF Exporter 2.8.3.66" }},
+  "extensionsUsed": ["KHR_materials_pbrSpecularGlossiness"],
+  "extensionsRequired": ["KHR_materials_pbrSpecularGlossiness"],
+  "scene": 0, "scenes": [{{ "nodes": [0] }}], "nodes": [{{ "mesh": 0, "name": "Wyvern" }}],
+  "meshes": [{{ "primitives": [{{ "attributes": {{ "POSITION": 0, "TEXCOORD_0": 1 }}, "material": 0 }}] }}],
+  "materials": [{{ "name": "M_Wyvern", "extensions": {{ "KHR_materials_pbrSpecularGlossiness": {{
+      "diffuseTexture": {{ "index": 0 }}, "specularGlossinessTexture": {{ "index": 1 }} }} }} }}],
+  "textures": [{{ "source": 0 }}, {{ "source": 1 }}],
+  "images": [{{ "uri": "Wyvern_diffuse.png" }}, {{ "uri": "Wyvern_specgloss.png" }}],
+  "buffers": [{{ "uri": "Wyvern.bin", "byteLength": {len} }}],
+  "bufferViews": [{{ "buffer": 0, "byteOffset": 0, "byteLength": 36 }}, {{ "buffer": 0, "byteOffset": 36, "byteLength": 24 }}],
+  "accessors": [
+    {{ "bufferView": 0, "componentType": 5126, "count": 3, "type": "VEC3", "min": [0, 0, 0], "max": [1, 1, 0] }},
+    {{ "bufferView": 1, "componentType": 5126, "count": 3, "type": "VEC2" }}
+  ]
+}}"#,
+        len = bin.len()
+    );
+    std::fs::write(dir.path().join("Wyvern.gltf"), gltf).unwrap();
+    let files: Vec<FileEntry> = ["Wyvern.gltf", "Wyvern.bin", "Wyvern_diffuse.png", "Wyvern_specgloss.png"]
+        .iter()
+        .map(|p| FileEntry { path: p.to_string(), hash: String::new(), size: 1 })
+        .collect();
+    let res = process(&ProcessInput { root: dir.path(), files: &files, skeletons: &[] }, &PipelineConfig::default()).unwrap();
+    let m = &res.manifest;
+    assert_eq!(m.kind, Some(hangar_core::PreviewKind::Model), "warnings: {:?}", m.warnings);
+    assert_eq!(m.model_error, None);
+    let mat = &m.materials[0];
+    let slot = |s: TextureSlot| mat.textures.iter().find(|t| t.slot == s);
+    assert_eq!(slot(TextureSlot::BaseColor).and_then(|t| t.path.as_deref()), Some("Wyvern_diffuse.png"));
+    assert!(slot(TextureSlot::Roughness).is_some(), "{:?}", mat.textures);
+
+    let glb = res.artifacts.iter().find(|a| a.role == ArtifactRole::LodGlb(0)).unwrap();
+    let g = gltf::Gltf::from_slice(&glb.bytes).unwrap();
+    let buffers = gltf::import_buffers(&g.document, None, g.blob.clone()).unwrap();
+    let pbr = g.document.materials().next().unwrap().pbr_metallic_roughness();
+    assert_eq!(pbr.metallic_factor(), 1.0, "factors moved into the packed texture");
+    let tex = pbr.metallic_roughness_texture().expect("metal/rough map");
+    let view = match tex.texture().source().source() {
+        gltf::image::Source::View { view, .. } => view,
+        _ => panic!("embedded image expected"),
+    };
+    let data = &buffers[view.buffer().index()][view.offset()..view.offset() + view.length()];
+    let px = image::load_from_memory(data).unwrap().to_rgba8();
+    let (rough, metal) = (px.get_pixel(0, 0)[1], px.get_pixel(0, 0)[2]);
+    assert!((rough as i32 - 64).abs() <= 2, "roughness channel {rough}");
+    assert!(metal <= 2, "spec/gloss materials are dielectric (lossy encoding aside): {metal}");
+}

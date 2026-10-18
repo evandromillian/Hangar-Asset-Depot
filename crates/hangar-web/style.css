@@ -600,6 +600,8 @@ select { appearance: none; background-image: linear-gradient(45deg, transparent 
 .st-error { color: var(--danger); }
 .st-pending { color: var(--muted); }
 .tool-group.hidden { display: none; }
+.stage-banner { margin-bottom: 10px; overflow-wrap: anywhere; }
+.stage-banner .mono { font-size: 11.5px; }
 
 /* Reference skeletons (admin) */
 .topbar-link { color: var(--text-2); font-size: 13px; }
