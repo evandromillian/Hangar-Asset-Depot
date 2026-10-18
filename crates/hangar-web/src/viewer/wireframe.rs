@@ -42,8 +42,25 @@ fn edge_mesh(mesh: &Mesh) -> Option<Mesh> {
         indices.push(a);
         indices.push(b);
     }
+    // Lift the lines off their own triangles along the vertex normals so they win the depth test.
+    // A material `depth_bias` can't be used: wgpu rejects it for non-triangle topologies, and
+    // Bevy quits on that validation error.
+    let lifted = match mesh.attribute(Mesh::ATTRIBUTE_NORMAL) {
+        Some(VertexAttributeValues::Float32x3(nrm)) if nrm.len() == pos.len() => {
+            let (min, max) = pos.iter().fold((Vec3::MAX, Vec3::MIN), |(lo, hi), p| {
+                let p = Vec3::from(*p);
+                (lo.min(p), hi.max(p))
+            });
+            let eps = (max - min).length() * 1e-3;
+            pos.iter()
+                .zip(nrm)
+                .map(|(p, n)| (Vec3::from(*p) + Vec3::from(*n).normalize_or_zero() * eps).to_array())
+                .collect()
+        }
+        _ => pos.clone(),
+    };
     let mut lines = Mesh::new(PrimitiveTopology::LineList, RenderAssetUsages::RENDER_WORLD);
-    lines.insert_attribute(Mesh::ATTRIBUTE_POSITION, pos.clone());
+    lines.insert_attribute(Mesh::ATTRIBUTE_POSITION, lifted);
     lines.insert_indices(Indices::U32(indices));
     Some(lines)
 }
@@ -65,7 +82,6 @@ pub fn sync_wireframe(
                 materials.add(StandardMaterial {
                     base_color: Color::srgb(1.0, 0.69, 0.0),
                     unlit: true,
-                    depth_bias: 64.0,
                     ..default()
                 })
             })
