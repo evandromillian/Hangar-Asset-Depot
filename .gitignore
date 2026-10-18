@@ -1,0 +1,18 @@
+# Build output
+/target/
+/crates/hangar-web/dist/
+
+# Local blob storage (HANGAR_DATA)
+/data/
+
+# Local config / secrets — profile overrides hold real credentials (see CLAUDE.md)
+/config/app-dev.toml
+/config/app-test.toml
+/config/app-prod.toml
+.env
+.env.*
+
+# IDE
+/.idea/
+.vscode/
+*.iml

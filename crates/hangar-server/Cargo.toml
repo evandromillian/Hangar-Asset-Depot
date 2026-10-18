@@ -1,0 +1,49 @@
+[package]
+name = "hangar-server"
+description = "Hangar backend: REST API, content-addressed storage, versioning and processing jobs (summer-rs)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "hangar-server"
+path = "src/main.rs"
+
+[features]
+default = []
+# Store sa-token sessions in Redis instead of memory (survives restarts, multi-instance).
+redis-sessions = ["summer-sa-token/with-summer-redis", "dep:summer-redis"]
+
+[dependencies]
+hangar-core.workspace = true
+hangar-pipeline.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+uuid = { workspace = true, features = ["v4", "v7"] }
+chrono.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+blake3.workspace = true
+
+summer = "0.7"
+summer-web = { version = "0.7" }
+summer-sea-orm = { version = "0.7", default-features = false, features = ["postgres", "rustls", "with-web"] }
+summer-opendal = { version = "0.7", features = ["services-fs", "services-s3"] }
+summer-sa-token = { version = "0.7" }
+summer-redis = { version = "0.7", optional = true }
+sea-orm = { version = "2.0", default-features = false, features = ["macros", "with-uuid", "with-chrono", "with-json", "sqlx-postgres", "runtime-tokio-rustls"] }
+opendal = "0.55"
+
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["io"] }
+futures = "0.3"
+bytes = "1"
+argon2 = "0.5"
+tempfile = "3"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+which = "7"
+
+[dev-dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "cookies", "rustls-tls"] }
+image = { version = "0.25", default-features = false, features = ["png"] }

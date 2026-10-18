@@ -1,0 +1,66 @@
+[package]
+name = "hangar-web"
+description = "Hangar web client: Leptos UI + embedded Bevy 3D viewer (wasm32)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+hangar-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+uuid = { workspace = true, features = ["js"] }
+chrono = { workspace = true, features = ["wasmbind"] }
+blake3.workspace = true
+
+leptos = { version = "0.8", features = ["csr"] }
+leptos_router = "0.8"
+leptos-bevy-canvas = "0.6"
+gloo-net = { version = "0.6", default-features = false, features = ["http", "json"] }
+gloo-timers = { version = "0.3", features = ["futures"] }
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+console_error_panic_hook = "0.1"
+web-sys = { version = "0.3", features = [
+    "Blob", "File", "FileList", "HtmlInputElement", "DataTransfer", "DragEvent",
+    "Request", "RequestInit", "RequestCredentials", "Response", "Headers", "Window",
+    "HtmlCanvasElement", "Element", "DomRect", "Storage", "Location", "Url",
+    "KeyboardEvent", "MouseEvent", "WheelEvent", "Event", "EventTarget",
+] }
+
+bevy = { version = "0.19", default-features = false, features = [
+    "std",
+    # Part of Bevy's `default_app`: registers every `#[derive(Reflect)]` type automatically.
+    # Required since 0.17 — plugins such as bevy_gltf no longer call `register_type`, and the
+    # world-asset spawner panics on any unregistered component when instantiating a glTF scene.
+    "reflect_auto_register",
+    "async_executor",
+    "bevy_asset",
+    "bevy_log",
+    "bevy_winit",
+    "bevy_window",
+    "bevy_render",
+    "bevy_core_pipeline",
+    "bevy_pbr",
+    "bevy_gltf",
+    "bevy_mesh",
+    "bevy_image",
+    "bevy_camera",
+    "bevy_light",
+    "bevy_color",
+    "bevy_shader",
+    "bevy_material",
+    "bevy_mikktspace",
+    "bevy_gizmos",
+    "bevy_gizmos_render",
+    "png",
+    "jpeg",
+    "ktx2",
+    "zstd_rust",
+    "tonemapping_luts",
+    "webgl2",
+    "web",
+    "mouse",
+    "keyboard",
+] }

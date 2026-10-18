@@ -1,0 +1,54 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/hangar-core",
+    "crates/hangar-pipeline",
+    "crates/hangar-server",
+    "crates/hangar-web",
+    "crates/hangar-cli",
+]
+default-members = [
+    "crates/hangar-core",
+    "crates/hangar-pipeline",
+    "crates/hangar-server",
+    "crates/hangar-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+rust-version = "1.89"
+
+[workspace.dependencies]
+hangar-core = { path = "crates/hangar-core" }
+hangar-pipeline = { path = "crates/hangar-pipeline" }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["serde"] }
+chrono = { version = "0.4", default-features = false, features = ["serde", "clock", "std"] }
+anyhow = "1"
+thiserror = "2"
+tracing = "0.1"
+blake3 = "1.8"
+
+[profile.dev.package."*"]
+# Dependencies (image decoding, meshopt, ufbx, Bevy) are painfully slow unoptimised.
+opt-level = 2
+
+[profile.dev.package.hangar-pipeline]
+# Per-pixel / per-vertex loops (thumbnails, texture resizing) need optimisation even in dev.
+opt-level = 2
+
+[profile.release]
+lto = "thin"
+codegen-units = 4
+
+# Optimise the wasm bundle for size when building the frontend in release.
+[profile.wasm-release]
+inherits = "release"
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+panic = "abort"

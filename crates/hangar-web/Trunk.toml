@@ -1,0 +1,15 @@
+[build]
+target = "index.html"
+dist = "dist"
+
+[serve]
+addresses = ["127.0.0.1"]
+port = 8080
+
+# Dev: the summer-rs backend runs on :8100; everything under /api/ is proxied.
+[[proxies]]
+backend = "http://127.0.0.1:8100/api/"
+
+[tools]
+# Must match the wasm-bindgen crate version in Cargo.lock.
+wasm_bindgen = "0.2.129"

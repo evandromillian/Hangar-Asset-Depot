@@ -1,0 +1,27 @@
+[package]
+name = "hangar-pipeline"
+description = "Asset processing pipeline: FBX/glTF/OBJ import, LOD generation, texture variants, GLB export, thumbnails"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+hangar-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+blake3.workspace = true
+
+ufbx = "0.10"
+gltf = { version = "1.4", default-features = false, features = ["import", "utils", "names", "extras", "KHR_materials_emissive_strength", "KHR_texture_transform"] }
+tobj = "4"
+meshopt = "0.7"
+glam = "0.30"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "tga", "bmp", "tiff", "webp", "hdr", "rayon"] }
+hound = "3.5"
+walkdir = "2"
+
+[dev-dependencies]
+tempfile = "3"

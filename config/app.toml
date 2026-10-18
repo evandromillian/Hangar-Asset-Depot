@@ -1,0 +1,52 @@
+#:schema https://summer-rs.github.io/config-schema.json
+# Hangar server configuration. Values like ${VAR:default} are read from the environment.
+# Environment overrides: config/app-dev.toml / app-prod.toml (SUMMER_ENV=dev|prod).
+
+[web]
+binding = "${HANGAR_BIND:0.0.0.0}"
+port = 8100
+graceful = true
+
+[web.middlewares]
+catch_panic = { enable = true }
+logger = { enable = true, level = "info" }
+# Serves the compiled web client (trunk build --release) with SPA fallback.
+static = { enable = true, uri = "/", path = "${HANGAR_WEB_DIST:crates/hangar-web/dist}", fallback = "index.html" }
+
+[logger]
+level = "info"
+pretty_backtrace = true
+
+[sea-orm]
+uri = "${DATABASE_URL:postgres://hangar:hangar@localhost:5432/hangar}"
+min_connections = 1
+max_connections = 16
+enable_logging = false
+
+[opendal]
+# Local disk. For S3/MinIO use:
+#   scheme = "s3"
+#   options = { bucket = "hangar", endpoint = "http://localhost:9000", region = "us-east-1", access_key_id = "...", secret_access_key = "..." }
+scheme = "fs"
+options = { root = "${HANGAR_DATA:./data}" }
+
+[sa-token]
+token_name = "hangar_token"
+timeout = 604800          # 7 days (keep in sync with hangar.session_ttl)
+active_timeout = -1
+auto_renew = true
+is_concurrent = true
+is_share = false
+token_style = "Random64"
+
+[hangar]
+allow_signup = false
+cookie_secure = false
+session_ttl = 604800
+workers = 1
+# "auto" looks for `blender` on PATH; set an absolute path or "" to disable the fallback.
+blender_path = "${HANGAR_BLENDER:auto}"
+blender_script = "tools/blender/export_glb.py"
+max_texture_size = 2048
+lod_ratios = [0.5, 0.25, 0.1]
+thumbnail_size = 512

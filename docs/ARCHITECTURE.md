@@ -1,0 +1,170 @@
+# Hangar — arquitetura
+
+Hangar é um gerenciador de ativos digitais (DAM) para 3D e games, escrito 100% em Rust:
+armazena, versiona e visualiza modelos, texturas, áudio e afins. O caso de uso central é
+o de um modelo comprado (ex.: um tanque) que precisa de correções e melhorias ao longo do
+tempo, mantendo o histórico e permitindo comparar versões, LODs e variantes de textura
+(deserto, floresta, inverno...).
+
+```
+┌──────────────────────── navegador (wasm32) ────────────────────────┐
+│  hangar-web                                                         │
+│  ├─ Leptos 0.8 (CSR): biblioteca, detalhe do asset, upload, versões │
+│  └─ Bevy 0.19 (WebGL2) via leptos-bevy-canvas: viewer 3D             │
+│        câmera orbital · LOD · variantes · wireframe · grid           │
+└───────────────▲─────────────────────────────────────────────────────┘
+                │ REST/JSON + blobs (cookie HttpOnly ou Bearer)
+┌───────────────┴──────────── hangar-server (summer-rs) ──────────────┐
+│ WebPlugin (axum) ─ rotas /api/**                                     │
+│ SaTokenPlugin    ─ sessões/login (memória ou Redis)                  │
+│ SeaOrmPlugin     ─ Postgres (metadados, versões, árvore de arquivos) │
+│ OpenDALPlugin    ─ blobs content-addressed (fs local ou S3/MinIO)    │
+│ JobsPlugin       ─ fila em Postgres (SKIP LOCKED) + workers          │
+│        └─ hangar-pipeline (spawn_blocking)                           │
+│             ufbx · gltf · tobj · Blender headless (fallback)         │
+│             LODs (meshoptimizer) · variantes · GLB · thumbnails      │
+└──────────────────────────────────────────────────────────────────────┘
+```
+
+## Crates
+
+| crate | alvo | papel |
+|---|---|---|
+| `hangar-core` | native + wasm | DTOs da API, enums, manifesto de preview, utilitários de caminho |
+| `hangar-pipeline` | native | importação (FBX/glTF/OBJ/Blender), resolução de texturas, detecção de variantes, LODs, exportação GLB, thumbnail por rasterização em software, metadados de áudio |
+| `hangar-server` | native | API REST em summer-rs, storage, versionamento, fila de jobs |
+| `hangar-web` | wasm32 | UI Leptos + viewer Bevy |
+| `hangar-cli` | native | `hangar push/pull/versions/diff` — envia uma pasta como nova versão (só o que mudou) |
+
+## Modelo de versionamento
+
+O versionamento segue a ideia de um commit do git, mas por **asset** e com arquivos
+binários grandes:
+
+* **Blob** — conteúdo imutável identificado pelo BLAKE3 do arquivo. Guardado uma única vez
+  em `blobs/ab/cd/<hash>` no OpenDAL. Duas versões que compartilham a mesma textura de
+  200 MB ocupam 200 MB, não 400.
+* **Versão** — snapshot imutável: uma árvore `caminho → blob` + `parent_id` + mensagem +
+  autor. A numeração (`v1`, `v2`, …) é sequencial por asset; o `parent_id` forma um DAG,
+  então dá para “ramificar” (ex.: v4 corrige o casco a partir de v2, ignorando a v3).
+* **Head** — a versão exibida por padrão no asset. Toda versão nova vira head (opcional).
+* **Commit incremental** — `POST /api/assets/{id}/versions` com `parent_id` e
+  `inherit=true` parte da árvore do pai e aplica `upserts`/`deletes`. Para corrigir o mesh
+  basta enviar o novo `.fbx`; as texturas são herdadas sem upload.
+* **Upload deduplicado** — o cliente calcula o BLAKE3 de cada arquivo (no browser, em
+  wasm), pergunta `POST /api/blobs/missing` quais faltam e só envia esses com
+  `PUT /api/blobs/{hash}` (streaming; o servidor recalcula e valida o hash).
+* **Diff** — `GET /api/versions/{id}/diff?against=` compara duas árvores
+  (adicionados / removidos / modificados / inalterados).
+
+```mermaid
+graph LR
+  v1["v1 · original comprado"] --> v2["v2 · preenche parte inferior do casco"]
+  v2 --> v3["v3 · nova camuflagem inverno"]
+  v2 --> v4["v4 · LODs refeitos (ramo a partir de v2)"]
+```
+
+## Pipeline de processamento
+
+Cada versão nova enfileira um job `process_version`. O worker baixa os arquivos
+relevantes (modelos, imagens, áudio) para um diretório temporário e chama
+`hangar_pipeline::process` em `spawn_blocking`:
+
+1. **Arquivo primário** — `.glb/.gltf` > `.fbx` > `.obj` > `.blend`. Vários arquivos de
+   modelo com sufixo `_LOD0`, `_LOD1`… são tratados como LODs autorais.
+2. **Importação** — `ufbx` (FBX, normaliza para Y-up/metros), `gltf` e `tobj`.
+   Formatos não suportados nativamente (ex.: `.blend`) ou falhas caem no **fallback do
+   Blender headless** (`tools/blender/export_glb.py`), quando configurado.
+3. **Resolução de texturas** — FBX comprados costumam apontar para `C:\Users\artista\...`.
+   O pipeline tenta: caminho exato → mesmo nome de arquivo em qualquer pasta → nome do
+   material (`M_Body` ↔ `T_Body_BaseColor.png`) com detecção do slot pelo sufixo
+   (`_D`, `_BaseColor`, `_N`, `_ORM`, `_R`, `_M`, `_AO`, `_E`...).
+4. **Variantes de textura** — dois arquivos que diferem em um único token que não é um slot
+   (`Desert/T_Body_D.png` × `Woodland/T_Body_D.png`, ou `T_Body_Desert_D` ×
+   `T_Body_Woodland_D`) formam variantes. A primeira referenciada pelo modelo é a padrão.
+5. **LODs** — autorais (por nome) ou gerados com `meshopt::simplify` (50% / 25% / 10% por
+   padrão), cada um exportado como **GLB autocontido** com texturas reduzidas.
+6. **Thumbnail** — rasterizador em software (z-buffer + Lambert + textura base) gera um
+   PNG sem precisar de GPU no servidor.
+7. **Texturas e áudio** — previews web (PNG/JPEG ≤ 2048 px) e envelope de picos para
+   waveform de WAV.
+
+O resultado é um `PreviewManifest` (JSON em `asset_versions.preview`) + blobs gerados
+(registrados em `renditions`). O viewer só consome GLB e imagens web.
+
+## Viewer 3D
+
+Bevy 0.19 roda dentro de um `<canvas>` gerenciado pelo Leptos (`leptos-bevy-canvas`).
+O Leptos faz todo o HTTP e envia mensagens ao Bevy:
+
+* `LoadModel { bytes }` — GLB do LOD escolhido (via fonte de assets em memória);
+  a câmera é preservada entre versões, então alternar v1/v2 funciona como comparação A/B.
+* `ApplyVariant { textures }` — troca as texturas dos materiais por nome.
+* `SetWireframe`, `SetAutoRotate`, `SetGrid`, `ResetCamera`.
+
+Controles: botão esquerdo orbita, direito/meio faz pan, roda dá zoom, `F` enquadra.
+
+## Banco de dados (Postgres)
+
+```
+users(id, username, display_name, password_hash, is_admin, created_at)
+projects(id, slug, name, description, created_by, created_at)
+project_members(project_id, user_id, role[owner|editor|viewer])
+blobs(hash, size, mime, created_at)
+assets(id, project_id, slug, name, kind, description, tags jsonb, source jsonb,
+       head_version_id, created_by, created_at, updated_at)
+asset_versions(id, asset_id, number, parent_id, message, author_id, status, error,
+               preview jsonb, file_count, total_size, created_at, processed_at)
+version_files(version_id, path, blob_hash, size)          -- a árvore
+renditions(version_id, kind, key, blob_hash, meta)         -- LOD GLBs, thumbs, previews
+jobs(id, kind, payload, status, attempts, max_attempts, run_after, locked_at, last_error)
+```
+
+As migrations são SQL puro embutido no binário (`crates/hangar-server/migrations`),
+aplicadas no boot com controle em `schema_migrations`.
+
+## Permissões
+
+* `is_admin` (global) — vê tudo, cria usuários, vê a fila de jobs. O primeiro usuário
+  registrado vira admin.
+* Por projeto: `owner` (gerencia membros, apaga assets), `editor` (cria assets e versões),
+  `viewer` (somente leitura).
+* Blobs são endereçados por hash de 256 bits; o download exige login e o hash funciona como
+  capability (não é enumerável). Arquivos por caminho (`/raw/`) e zip verificam o projeto.
+
+## API REST
+
+Autenticação: cookie `hangar_token` (HttpOnly, definido no login) ou
+`Authorization: Bearer <token>`.
+
+| método | rota | corpo → resposta |
+|---|---|---|
+| GET | `/api/health` | `"ok"` |
+| GET | `/api/setup` | `SetupStatus` (público) |
+| POST | `/api/auth/register` | `RegisterRequest` → `LoginResponse` (primeiro usuário ou signup aberto) |
+| POST | `/api/auth/login` | `LoginRequest` → `LoginResponse` + cookie |
+| POST | `/api/auth/logout` | 204 |
+| GET | `/api/auth/me` | `UserDto` |
+| GET/POST | `/api/users` | admin: lista / `CreateUserRequest` |
+| GET/POST | `/api/projects` | `Vec<ProjectDto>` / `CreateProjectRequest` → `ProjectDto` |
+| GET | `/api/projects/{pid}` | `ProjectDto` |
+| GET/POST | `/api/projects/{pid}/members` | `Vec<MemberDto>` / `AddMemberRequest` |
+| DELETE | `/api/projects/{pid}/members/{uid}` | 204 |
+| GET | `/api/projects/{pid}/assets?q=&kind=&tag=&page=&size=` | `Page<AssetSummary>` |
+| POST | `/api/projects/{pid}/assets` | `CreateAssetRequest` → `AssetDetail` |
+| GET/PATCH/DELETE | `/api/assets/{aid}` | `AssetDetail` / `UpdateAssetRequest` |
+| GET | `/api/assets/{aid}/versions` | `Vec<VersionDto>` (mais nova primeiro) |
+| POST | `/api/assets/{aid}/versions` | `CommitVersionRequest` → `VersionDto` |
+| GET | `/api/versions/{vid}` | `VersionDto` |
+| GET | `/api/versions/{vid}/files` | `Vec<FileEntry>` |
+| GET | `/api/versions/{vid}/diff?against=` | `VersionDiff` |
+| POST | `/api/versions/{vid}/reprocess` | `VersionDto` |
+| GET | `/api/versions/{vid}/raw/{*path}` | bytes do arquivo (`?download=1` força anexo) |
+| GET | `/api/versions/{vid}/archive` | zip da árvore |
+| POST | `/api/blobs/missing` | `MissingBlobsRequest` → `MissingBlobsResponse` |
+| PUT | `/api/blobs/{hash}` | corpo cru → `BlobUploaded` |
+| GET | `/api/blobs/{hash}` | bytes (cache imutável) |
+| GET | `/api/jobs?status=` | admin: `Vec<JobDto>` |
+| POST | `/api/admin/gc?grace_hours=24` | admin: apaga blobs não referenciados |
+
+Erros: status HTTP + corpo texto (`KnownWebError` do summer-web).

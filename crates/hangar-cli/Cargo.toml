@@ -1,0 +1,26 @@
+[package]
+name = "hangar-cli"
+description = "Command line client for Hangar: push a folder as a new asset version, pull versions, list assets"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "hangar"
+path = "src/main.rs"
+
+[dependencies]
+hangar-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+anyhow.workspace = true
+blake3.workspace = true
+walkdir = "2"
+clap = { version = "4.6.7", features = ["derive", "env"] }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+dirs = "7.0.0"
+rpassword = "7.5.4"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
