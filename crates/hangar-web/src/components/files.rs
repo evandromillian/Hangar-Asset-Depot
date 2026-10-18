@@ -16,7 +16,13 @@ enum Change {
 }
 
 #[component]
-pub fn FilesPanel(version: Signal<Option<VersionDto>>, versions: Signal<Vec<VersionDto>>) -> impl IntoView {
+pub fn FilesPanel(
+    version: Signal<Option<VersionDto>>,
+    versions: Signal<Vec<VersionDto>>,
+    can_write: Signal<bool>,
+    /// Opens the upload dialog to add / replace files on top of this version.
+    on_add: Callback<()>,
+) -> impl IntoView {
     let vid = Memo::new(move |_| version.get().map(|v| v.id));
     let parent = Memo::new(move |_| version.get().and_then(|v| v.parent_id));
     // None = compare with the parent.
@@ -89,11 +95,20 @@ pub fn FilesPanel(version: Signal<Option<VersionDto>>, versions: Signal<Vec<Vers
                     <input type="checkbox" bind:checked=only_changes />
                     "só alterações"
                 </label>
+                <Show when=move || can_write.get() && vid.get().is_some()>
+                    <button
+                        class="btn btn-sm btn-primary push-right"
+                        title="Envia texturas corrigidas, animações e outros arquivos sobre esta versão"
+                        on:click=move |_| on_add.run(())
+                    >
+                        "+ Adicionar arquivos"
+                    </button>
+                </Show>
                 {move || {
                     vid.get()
                         .map(|v| {
                             view! {
-                                <a class="btn btn-sm push-right" href=api::archive_url(v) download="">
+                                <a class="btn btn-sm" class:push-right=move || !can_write.get() href=api::archive_url(v) download="">
                                     "⇩ .zip"
                                 </a>
                             }

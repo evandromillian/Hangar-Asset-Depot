@@ -1,11 +1,14 @@
 //! "New version" dialog: pick files/folders, hash them in wasm (BLAKE3),
 //! upload only blobs the server does not have, then commit the version.
+//! On top of an existing version it adds or replaces files: a file named like
+//! exactly one existing file replaces it in place, and a destination folder
+//! places new content (e.g. `Animations/`) anywhere in the tree.
 
 use crate::api;
 use crate::components::common::{ErrorBanner, Modal};
 use crate::upload::{self, PickedFile};
 use crate::util::fmt_bytes;
-use hangar_core::{CommitVersionRequest, FileEntry, VersionDto};
+use hangar_core::{CommitVersionRequest, FileEntry, VersionDto, paths};
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use std::collections::{HashMap, HashSet};
@@ -28,6 +31,27 @@ struct RowState {
     hash: Option<String>,
 }
 
+/// `\\a\\b/` → `a/b`.
+fn clean_folder(s: &str) -> String {
+    s.trim().replace('\\', "/").trim_matches('/').to_string()
+}
+
+/// Where a picked file goes in the new version, and whether that is an automatic
+/// match with the only existing file of the same name (a corrected texture picked
+/// on its own replaces `Texture1/…` instead of landing in the root).
+fn target_of(picked: &str, dest: &str, by_name: &HashMap<String, Vec<String>>, keep_new: bool) -> (String, bool) {
+    if !dest.is_empty() {
+        return (format!("{dest}/{picked}"), false);
+    }
+    if !picked.contains('/')
+        && !keep_new
+        && let Some([only]) = by_name.get(&picked.to_lowercase()).map(Vec::as_slice)
+    {
+        return (only.clone(), true);
+    }
+    (picked.to_string(), false)
+}
+
 #[component]
 pub fn NewVersionDialog(
     asset_id: Uuid,
@@ -35,6 +59,7 @@ pub fn NewVersionDialog(
     default_parent: Option<Uuid>,
     on_close: Callback<()>,
     on_committed: Callback<VersionDto>,
+    #[prop(optional, into)] title: Option<String>,
 ) -> impl IntoView {
     let picked: RwSignal<Vec<PickedFile>, LocalStorage> = RwSignal::new_local(Vec::new());
     let rows = RwSignal::new(Vec::<RowState>::new());
@@ -46,6 +71,10 @@ pub fn NewVersionDialog(
     let busy = RwSignal::new(false);
     let error = RwSignal::new(None::<String>);
     let summary = RwSignal::new(None::<(f64, f64)>); // (uploaded, deduplicated)
+    // Destination folder for picked files ("" = as picked).
+    let dest = RwSignal::new(String::new());
+    // Picked paths whose automatic "replace the file with this name" is undone.
+    let keep_new = RwSignal::new(HashSet::<String>::new());
     let folder_input = NodeRef::<leptos::html::Input>::new();
 
     Effect::new(move |_| {
@@ -64,8 +93,34 @@ pub fn NewVersionDialog(
         }
     });
 
+    // Paths of the base version when its files are inherited.
+    let existing = Memo::new(move |_| {
+        if !inherit.get() || parent.get().is_none() {
+            return Vec::<String>::new();
+        }
+        parent_files.get().and_then(|r| r.ok()).map(|l| l.into_iter().map(|f| f.path).collect()).unwrap_or_default()
+    });
+    let targets = Memo::new(move |_| {
+        let mut by_name: HashMap<String, Vec<String>> = HashMap::new();
+        for p in existing.get() {
+            by_name.entry(paths::file_name(&p).to_lowercase()).or_default().push(p);
+        }
+        let dest = clean_folder(&dest.get());
+        let opted = keep_new.get();
+        picked.with(|l| l.iter().map(|f| target_of(&f.path, &dest, &by_name, opted.contains(&f.path))).collect::<Vec<_>>())
+    });
+
     let add_files = move |mut files: Vec<PickedFile>| {
-        upload::strip_common_top(&mut files);
+        // A dropped folder is normally the asset's own folder: drop its name. On top
+        // of an existing tree keep it (`Animations/…`), unless stripping is what lines
+        // the paths up with existing files (the asset folder dropped again).
+        let tree: HashSet<String> = existing.get_untracked().into_iter().collect();
+        let mut stripped = files.clone();
+        upload::strip_common_top(&mut stripped);
+        let hits = |l: &[PickedFile]| l.iter().filter(|f| tree.contains(&f.path)).count();
+        if tree.is_empty() || hits(&stripped) > hits(&files) {
+            files = stripped;
+        }
         picked.update(|list| {
             for f in files {
                 if let Some(existing) = list.iter_mut().find(|e| e.path == f.path) {
@@ -134,6 +189,12 @@ pub fn NewVersionDialog(
             error.set(Some("Descreva o que mudou nesta versão.".into()));
             return;
         }
+        let target_paths: Vec<String> = targets.get_untracked().into_iter().map(|(t, _)| t).collect();
+        let mut seen = HashSet::new();
+        if let Some(dup) = target_paths.iter().find(|t| !seen.insert(t.to_lowercase())) {
+            error.set(Some(format!("Dois arquivos iriam para o mesmo caminho: {dup}")));
+            return;
+        }
         busy.set(true);
         error.set(None);
         let parent_id = parent.get_untracked();
@@ -193,8 +254,8 @@ pub fn NewVersionDialog(
                     inherit: inherit_now,
                     upserts: files
                         .iter()
-                        .zip(hashes.iter())
-                        .map(|(f, h)| FileEntry { path: f.path.clone(), hash: h.clone(), size: f.size() as i64 })
+                        .zip(hashes.iter().zip(&target_paths))
+                        .map(|(f, (h, path))| FileEntry { path: path.clone(), hash: h.clone(), size: f.size() as i64 })
                         .collect(),
                     deletes: if inherit_now { deletes_now } else { vec![] },
                     set_head: true,
@@ -213,7 +274,7 @@ pub fn NewVersionDialog(
     let version_options = versions.clone();
 
     view! {
-        <Modal title="Nova versão" on_close=on_close wide=true>
+        <Modal title=title.unwrap_or_else(|| "Nova versão".to_string()) on_close=on_close wide=true>
             <form class="form upload" on:submit=submit>
                 <div class="form-grid">
                     <label class="field">
@@ -246,6 +307,30 @@ pub fn NewVersionDialog(
                             on:change=move |ev| inherit.set(event_target_checked(&ev))
                         />
                         "Herdar arquivos da versão base (envie só o que mudou)"
+                    </label>
+                    <label class="field span-2">
+                        <span>"Pasta de destino"</span>
+                        <input
+                            type="text"
+                            class="mono"
+                            list="dest-folders"
+                            placeholder="como escolhido (raiz da versão); ex.: Animations"
+                            bind:value=dest
+                        />
+                        <datalist id="dest-folders">
+                            {move || {
+                                let mut folders: Vec<String> = existing
+                                    .get()
+                                    .iter()
+                                    .map(|p| paths::parent(p).to_string())
+                                    // `.hangar/` holds app settings, not content.
+                                    .filter(|p| !p.is_empty() && !p.starts_with('.'))
+                                    .collect();
+                                folders.sort();
+                                folders.dedup();
+                                folders.into_iter().map(|f| view! { <option value=f.clone()></option> }).collect_view()
+                            }}
+                        </datalist>
                     </label>
                     <label class="field span-2">
                         <span>"Mensagem"</span>
@@ -291,12 +376,9 @@ pub fn NewVersionDialog(
                     if files.is_empty() {
                         return ().into_any();
                     }
-                    let existing: HashSet<String> = parent_files
-                        .get()
-                        .and_then(|r| r.ok())
-                        .map(|l| l.into_iter().map(|f| f.path).collect())
-                        .unwrap_or_default();
-                    let inheriting = inherit.get() && parent.get().is_some();
+                    let existing: HashSet<String> = existing.get().into_iter().collect();
+                    let targets = targets.get();
+                    let opted = keep_new.get();
                     let states = rows.get();
                     view! {
                         <div class="upload-list-head">
@@ -320,7 +402,29 @@ pub fn NewVersionDialog(
                                 .enumerate()
                                 .map(|(i, f)| {
                                     let state = states.get(i).cloned();
-                                    let replaces = inheriting && existing.contains(&f.path);
+                                    let (target, auto) = targets.get(i).cloned().unwrap_or_else(|| (f.path.clone(), false));
+                                    let replaces = existing.contains(&target);
+                                    // The automatic match can be undone (and redone) per file.
+                                    let toggle = (auto || opted.contains(&f.path)).then(|| {
+                                        let key = f.path.clone();
+                                        let label = if auto { "manter como novo" } else { "substituir o existente" };
+                                        view! {
+                                            <button
+                                                type="button"
+                                                class="link-btn up-toggle"
+                                                disabled=move || busy.get()
+                                                on:click=move |_| keep_new.update(|k| {
+                                                    if !k.remove(&key) {
+                                                        k.insert(key.clone());
+                                                    }
+                                                })
+                                            >
+                                                {label}
+                                            </button>
+                                        }
+                                    });
+                                    let shown = if target == f.path { target.clone() } else { format!("{} → {target}", f.path) };
+                                    let shown_title = shown.clone();
                                     let (label, cls, pct) = match state.map(|s| s.phase) {
                                         None | Some(Phase::Waiting) => ("aguardando".to_string(), "", 0.0),
                                         Some(Phase::Hashing(p)) => (format!("hash {:.0}%", p * 100.0), "busy", p),
@@ -336,7 +440,10 @@ pub fn NewVersionDialog(
                                             <span class="up-badge mono" class:replace=replaces>
                                                 {if replaces { "subst." } else { "novo" }}
                                             </span>
-                                            <span class="up-path mono">{f.path.clone()}</span>
+                                            <span class="up-path mono" title=shown_title>
+                                                <span class="up-path-text">{shown}</span>
+                                                {toggle}
+                                            </span>
                                             <span class="up-size mono muted">{fmt_bytes(f.size() as i64)}</span>
                                             <span class="up-state">{label}</span>
                                             <span class="up-bar"><i style=format!("width:{:.0}%", pct * 100.0)></i></span>
@@ -379,7 +486,7 @@ pub fn NewVersionDialog(
                             None => view! { <span class="spinner"></span> }.into_any(),
                             Some(Err(e)) => view! { <ErrorBanner error=e.to_string() /> }.into_any(),
                             Some(Ok(list)) => {
-                                let incoming: HashSet<String> = picked.with(|l| l.iter().map(|f| f.path.clone()).collect());
+                                let incoming: HashSet<String> = targets.get().into_iter().map(|(t, _)| t).collect();
                                 view! {
                                     <ul class="inherit-list">
                                         {list

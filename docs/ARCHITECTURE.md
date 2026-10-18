@@ -50,7 +50,11 @@ binários grandes:
 * **Head** — a versão exibida por padrão no asset. Toda versão nova vira head (opcional).
 * **Commit incremental** — `POST /api/assets/{id}/versions` com `parent_id` e
   `inherit=true` parte da árvore do pai e aplica `upserts`/`deletes`. Para corrigir o mesh
-  basta enviar o novo `.fbx`; as texturas são herdadas sem upload.
+  basta enviar o novo `.fbx`; as texturas são herdadas sem upload. Na web, "Arquivos →
+  Adicionar arquivos" abre esse fluxo sobre a versão selecionada: um arquivo com o mesmo nome
+  de exatamente um arquivo existente o substitui no lugar (ex.: textura corrigida em
+  `Texture1/`), uma **pasta de destino** posiciona conteúdo novo (ex.: `Animations/`) e uma
+  pasta arrastada mantém o próprio nome (salvo quando é a pasta raiz do asset de novo).
 * **Upload deduplicado** — o cliente calcula o BLAKE3 de cada arquivo (no browser, em
   wasm), pergunta `POST /api/blobs/missing` quais faltam e só envia esses com
   `PUT /api/blobs/{hash}` (streaming; o servidor recalcula e valida o hash).

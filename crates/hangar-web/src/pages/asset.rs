@@ -125,6 +125,8 @@ pub fn AssetPage() -> impl IntoView {
         asset.refetch();
     });
     let show_upload = RwSignal::new(query.get_untracked().get("upload").is_some());
+    // The upload dialog opened from the Files tab: add / replace files on the selected version.
+    let adding_files = RwSignal::new(false);
     let show_edit = RwSignal::new(false);
     let action_error = RwSignal::new(None::<String>);
 
@@ -149,7 +151,14 @@ pub fn AssetPage() -> impl IntoView {
             }
         });
     });
-    let open_upload = Callback::new(move |_| show_upload.set(true));
+    let open_upload = Callback::new(move |_| {
+        adding_files.set(false);
+        show_upload.set(true);
+    });
+    let open_add_files = Callback::new(move |_| {
+        adding_files.set(true);
+        show_upload.set(true);
+    });
 
     // Two-step delete (owners only): first click arms, second deletes.
     let delete_armed = RwSignal::new(false);
@@ -220,7 +229,7 @@ pub fn AssetPage() -> impl IntoView {
                     </Show>
                     <Show when=move || can_write.get()>
                         <button class="btn btn-ghost" on:click=move |_| show_edit.set(true)>"Editar"</button>
-                        <button class="btn btn-primary" on:click=move |_| show_upload.set(true)>"+ Nova versão"</button>
+                        <button class="btn btn-primary" on:click=move |_| open_upload.run(())>"+ Nova versão"</button>
                     </Show>
                 </div>
             </header>
@@ -265,7 +274,15 @@ pub fn AssetPage() -> impl IntoView {
                                 />
                             }
                             .into_any(),
-                            Tab::Files => view! { <FilesPanel version=selected_version versions=versions_sig /> }.into_any(),
+                            Tab::Files => view! {
+                                <FilesPanel
+                                    version=selected_version
+                                    versions=versions_sig
+                                    can_write=can_write
+                                    on_add=open_add_files
+                                />
+                            }
+                            .into_any(),
                             Tab::Materials => view! {
                                 <MaterialsPanel
                                     version=selected_version
@@ -291,8 +308,10 @@ pub fn AssetPage() -> impl IntoView {
                         let default_parent = selected
                             .get_untracked()
                             .or_else(|| list.iter().find(|v| v.is_head).map(|v| v.id));
+                        let title = if adding_files.get_untracked() { "Adicionar ou substituir arquivos" } else { "Nova versão" };
                         view! {
                             <NewVersionDialog
+                                title=title
                                 asset_id=a
                                 versions=list
                                 default_parent=default_parent
