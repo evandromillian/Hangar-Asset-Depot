@@ -198,8 +198,9 @@ O Leptos faz todo o HTTP e envia mensagens ao Bevy:
 * `ApplyVariant { textures, hidden }` — troca as texturas dos materiais por nome e oculta
   texturas (pré-visualização da aba Materiais).
 * `SetWireframe`, `SetAutoRotate`, `SetGrid`, `ResetCamera`.
-* `SelectAnimation`, `SetAnimationPaused`, `StepAnimation(±quadros)`, `SetAnimationSpeed`
-  — barra de animação (seletor com anterior/próxima, pausa, quadro a quadro e velocidade,
+* `SelectAnimation`, `SetAnimationPaused`, `StepAnimation(±quadros)`, `SeekAnimation(s)`,
+  `SetAnimationSpeed` — barra de animação (seletor com anterior/próxima, pausa, quadro a
+  quadro, primeiro/último quadro e velocidade,
   negativa toca ao contrário). Os clipes do GLB vão para um `AnimationGraph`; o Bevy
   responde com `AnimationTime` para o contador de quadros.
 

@@ -109,6 +109,7 @@ pub fn handle_commands(
             | ViewerCommand::SelectAnimation(_)
             | ViewerCommand::SetAnimationPaused(_)
             | ViewerCommand::StepAnimation(_)
+            | ViewerCommand::SeekAnimation(_)
             | ViewerCommand::SetAnimationSpeed(_) => {}
         }
     }

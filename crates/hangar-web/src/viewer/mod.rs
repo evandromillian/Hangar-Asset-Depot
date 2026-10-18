@@ -43,6 +43,8 @@ pub enum ViewerCommand {
     SetAnimationPaused(bool),
     /// Move the current clip by whole frames (pauses it).
     StepAnimation(i32),
+    /// Jump to `seconds` of the current clip, clamped to the clip (pauses it).
+    SeekAnimation(f32),
     /// Playback rate; negative plays backwards.
     SetAnimationSpeed(f32),
 }

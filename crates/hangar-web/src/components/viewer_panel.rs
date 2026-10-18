@@ -270,6 +270,11 @@ pub fn ViewerPanel(
         anim_paused.set(true);
         tx.send(ViewerCommand::StepAnimation(frames)).ok();
     });
+    let tx = cmd_tx.clone();
+    let seek = Callback::new(move |seconds: f32| {
+        anim_paused.set(true);
+        tx.send(ViewerCommand::SeekAnimation(seconds)).ok();
+    });
 
     let current_lod = move || {
         preview.get().and_then(|p| p.lods.iter().find(|l| l.level == lod.get()).cloned())
@@ -334,6 +339,14 @@ pub fn ViewerPanel(
                     <div class="tool-group">
                         <button
                             class="toggle anim-btn"
+                            title="Primeiro quadro"
+                            disabled=move || anim_sel.get().is_none()
+                            on:click=move |_| seek.run(0.0)
+                        >
+                            "|◀◀"
+                        </button>
+                        <button
+                            class="toggle anim-btn"
                             title="Quadro anterior"
                             disabled=move || anim_sel.get().is_none()
                             on:click=move |_| step.run(-1)
@@ -356,6 +369,14 @@ pub fn ViewerPanel(
                             on:click=move |_| step.run(1)
                         >
                             "▶|"
+                        </button>
+                        <button
+                            class="toggle anim-btn"
+                            title="Último quadro"
+                            disabled=move || anim_sel.get().is_none()
+                            on:click=move |_| seek.run(current_clip().map_or(0.0, |a| a.duration_secs))
+                        >
+                            "▶▶|"
                         </button>
                     </div>
                     <label class="tool-group anim-rate" title="Velocidade de reprodução (negativa toca ao contrário)">

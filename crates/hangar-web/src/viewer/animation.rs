@@ -132,6 +132,18 @@ pub fn handle_animation_commands(
                 });
                 state.last_reported = None;
             }
+            ViewerCommand::SeekAnimation(seconds) => {
+                let Some((_, info, _)) = state.clip() else { continue };
+                state.paused = true;
+                // Paused clips aren't advanced, so `duration` itself stays the
+                // last pose instead of wrapping to the first.
+                let t = seconds.clamp(0.0, info.duration);
+                with_active(&state, &mut players, |a| {
+                    a.pause();
+                    a.seek_to(t);
+                });
+                state.last_reported = None;
+            }
             _ => {}
         }
     }
