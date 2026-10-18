@@ -14,7 +14,7 @@ use clap::{Parser, Subcommand};
 use hangar_core::{
     AssetDetail, AssetKind, AssetSource, AssetSummary, CommitVersionRequest, CreateAssetRequest, FileEntry,
     LoginRequest, LoginResponse, MissingBlobsRequest, MissingBlobsResponse, Page, ProjectDto, UserDto, VersionDiff,
-    VersionDto, VersionStatus, paths,
+    VersionDto, VersionStatus, MATERIAL_CONFIG_PATH, paths,
 };
 use reqwest::blocking::{Client, RequestBuilder, Response};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -340,7 +340,9 @@ fn human(bytes: i64) -> String {
 
 /// Junk that tools leave around and nobody wants versioned.
 fn ignored(name: &str) -> bool {
-    name.starts_with('.') || matches!(name, "Thumbs.db" | "desktop.ini") || name.ends_with(".blend1") || name.ends_with('~')
+    // `.hangar/` holds versioned settings (materials.json); other dotfiles are local noise.
+    (name.starts_with('.') && name != ".hangar")
+        || matches!(name, "Thumbs.db" | "desktop.ini") || name.ends_with(".blend1") || name.ends_with('~')
 }
 
 struct LocalFile {
@@ -397,8 +399,10 @@ fn push(api: &Api, asset: Uuid, dir: &Path, message: String, parent: &str, mirro
     let upserts: Vec<&LocalFile> =
         local.iter().filter(|f| remote.get(&f.entry.path).map(|r| r.hash != f.entry.hash).unwrap_or(true)).collect();
     let deletes: Vec<String> = if mirror {
+        // Material settings made in the web UI survive a mirror push from a folder
+        // that doesn't have them (they are edited there, or pushed when present locally).
         let here: std::collections::HashSet<&str> = local.iter().map(|f| f.entry.path.as_str()).collect();
-        remote.keys().filter(|p| !here.contains(p.as_str())).cloned().collect()
+        remote.keys().filter(|p| !here.contains(p.as_str()) && p.as_str() != MATERIAL_CONFIG_PATH).cloned().collect()
     } else {
         vec![]
     };

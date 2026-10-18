@@ -239,12 +239,35 @@ pub fn archive_url(vid: Uuid) -> String {
     format!("/api/versions/{vid}/archive")
 }
 
+/// The manual material configuration of a version; `None` when it has none.
+pub async fn material_config(vid: Uuid) -> ApiResult<Option<MaterialConfig>> {
+    match get_bytes(&raw_file_url(vid, MATERIAL_CONFIG_PATH, false)).await {
+        Ok(bytes) => MaterialConfig::from_json(&bytes)
+            .map(Some)
+            .map_err(|e| ApiError { status: 422, message: format!("{MATERIAL_CONFIG_PATH} inválido: {e}") }),
+        Err(e) if e.status == 404 => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
 // ------------------------------------------------------------------------ blobs
 
 pub async fn missing_blobs(hashes: Vec<String>) -> ApiResult<Vec<String>> {
     let url = "/api/blobs/missing";
     let r: MissingBlobsResponse = body_json(Request::post(url), url, &MissingBlobsRequest { hashes }).await?;
     Ok(r.missing)
+}
+
+/// Stores in-memory bytes as a blob (skipped when the server already has it)
+/// and returns the file entry to commit at `path`.
+pub async fn upload_bytes(path: &str, bytes: &[u8]) -> ApiResult<FileEntry> {
+    let hash = blake3::hash(bytes).to_hex().to_string();
+    if !missing_blobs(vec![hash.clone()]).await?.is_empty() {
+        let parts = js_sys::Array::of1(&js_sys::Uint8Array::from(bytes));
+        let blob = web_sys::Blob::new_with_u8_array_sequence(&parts).map_err(|e| net_err(format!("{e:?}")))?;
+        put_blob(&hash, &blob).await?;
+    }
+    Ok(FileEntry { path: path.to_string(), hash, size: bytes.len() as i64 })
 }
 
 /// Uploads a blob; the browser streams the `File`/`Blob` directly.

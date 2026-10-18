@@ -5,11 +5,13 @@
 
 pub mod api;
 pub mod enums;
+pub mod materials;
 pub mod paths;
 pub mod preview;
 
 pub use api::*;
 pub use enums::*;
+pub use materials::*;
 pub use preview::*;
 
 /// Hex-encoded BLAKE3 digest (64 lowercase hex chars) — the identity of a blob.

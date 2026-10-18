@@ -99,11 +99,12 @@ pub struct ProcessOutput {
     pub artifacts: Vec<Artifact>,
 }
 
-/// Whether a file is needed by the pipeline (models, images, audio, and
-/// sidecar files such as `.mtl` / `.bin`).
+/// Whether a file is needed by the pipeline (models, images, audio, sidecar
+/// files such as `.mtl` / `.bin`, and the manual material configuration).
 pub fn is_relevant(path: &str) -> bool {
     let ext = hangar_core::paths::extension(path);
-    hangar_core::paths::is_model(path)
+    path == hangar_core::MATERIAL_CONFIG_PATH
+        || hangar_core::paths::is_model(path)
         || hangar_core::paths::is_image(path)
         || hangar_core::paths::is_audio(path)
         || matches!(ext.as_str(), "mtl" | "bin")

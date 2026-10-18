@@ -2,6 +2,7 @@ pub mod asset_form;
 pub mod common;
 pub mod details;
 pub mod files;
+pub mod materials;
 pub mod members;
 pub mod new_version;
 pub mod stage;

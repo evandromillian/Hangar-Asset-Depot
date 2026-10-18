@@ -67,8 +67,9 @@ fn single_difference(a: &Tokens, b: &Tokens) -> Option<usize> {
     diff
 }
 
+/// Numbers (UDIM tiles `1001`/`1002`, part numbers `01`/`02`) name parts, not skins.
 fn is_variant_token(t: &str) -> bool {
-    slot_from_token(t).is_none() && !is_resolution_token(t)
+    slot_from_token(t).is_none() && !is_resolution_token(t) && !t.chars().all(|c| c.is_ascii_digit())
 }
 
 /// Detect variants. `images` is every image path of the version; `used`
@@ -226,5 +227,16 @@ mod tests {
             used("Wheel2", TextureSlot::BaseColor, "T_Wheel_02_D.png"),
         ];
         assert_eq!(detect(&images, &u)[0].name, "Default");
+    }
+
+    #[test]
+    fn unused_tiles_are_not_variants() {
+        // Only tile 1001 is referenced; 1002 is another UV tile, not a skin.
+        let images: Vec<String> =
+            ["Tank_BaseColor.1001.png", "Tank_BaseColor.1002.png"].iter().map(|s| s.to_string()).collect();
+        let u = vec![used("a1", TextureSlot::BaseColor, "Tank_BaseColor.1001.png")];
+        let v = detect(&images, &u);
+        assert_eq!(v.len(), 1, "{v:?}");
+        assert_eq!(v[0].detected_by, "default");
     }
 }

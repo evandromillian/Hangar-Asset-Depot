@@ -5,10 +5,11 @@ use crate::components::asset_form::EditAssetModal;
 use crate::components::common::{ErrorBanner, KindBadge};
 use crate::components::details::DetailsPanel;
 use crate::components::files::FilesPanel;
+use crate::components::materials::MaterialsPanel;
 use crate::components::new_version::NewVersionDialog;
 use crate::components::stage::Stage;
 use crate::components::versions::VersionTimeline;
-use hangar_core::{AssetDetail, UpdateAssetRequest, VersionDto, VersionStatus};
+use hangar_core::{AssetDetail, TextureOverride, UpdateAssetRequest, VersionDto, VersionStatus};
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use leptos_router::components::A;
@@ -20,6 +21,7 @@ use uuid::Uuid;
 enum Tab {
     Versions,
     Files,
+    Materials,
     Details,
 }
 
@@ -113,6 +115,14 @@ pub fn AssetPage() -> impl IntoView {
     });
 
     let tab = RwSignal::new(Tab::Versions);
+    // Unsaved texture assignments of the materials tab, previewed by the viewer.
+    let draft = RwSignal::new(None::<Vec<TextureOverride>>);
+    let draft_sig = Signal::derive(move || draft.get());
+    let on_material_commit = Callback::new(move |v: VersionDto| {
+        selected.set(Some(v.id));
+        versions_res.refetch();
+        asset.refetch();
+    });
     let show_upload = RwSignal::new(query.get_untracked().get("upload").is_some());
     let show_edit = RwSignal::new(false);
     let action_error = RwSignal::new(None::<String>);
@@ -223,6 +233,7 @@ pub fn AssetPage() -> impl IntoView {
                         can_write=can_write
                         on_reprocess=on_reprocess
                         on_upload=open_upload
+                        draft=draft_sig
                     />
                 </div>
                 <aside class="side-col">
@@ -232,6 +243,9 @@ pub fn AssetPage() -> impl IntoView {
                         </button>
                         <button class="tab" class:active=move || tab.get() == Tab::Files on:click=move |_| tab.set(Tab::Files)>
                             "Arquivos " <span class="count">{move || selected_version.get().map(|v| v.file_count).unwrap_or(0)}</span>
+                        </button>
+                        <button class="tab" class:active=move || tab.get() == Tab::Materials on:click=move |_| tab.set(Tab::Materials)>
+                            "Materiais " <span class="count">{move || selected_version.get().and_then(|v| v.preview).map(|p| p.materials.len()).unwrap_or(0)}</span>
                         </button>
                         <button class="tab" class:active=move || tab.get() == Tab::Details on:click=move |_| tab.set(Tab::Details)>
                             "Detalhes"
@@ -251,6 +265,16 @@ pub fn AssetPage() -> impl IntoView {
                             }
                             .into_any(),
                             Tab::Files => view! { <FilesPanel version=selected_version versions=versions_sig /> }.into_any(),
+                            Tab::Materials => view! {
+                                <MaterialsPanel
+                                    version=selected_version
+                                    asset_id=aid_or_nil
+                                    can_write=can_write
+                                    draft=draft
+                                    on_committed=on_material_commit
+                                />
+                            }
+                            .into_any(),
                             Tab::Details => view! { <DetailsPanel asset=asset_sig version=selected_version /> }.into_any(),
                         }}
                     </div>

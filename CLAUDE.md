@@ -109,6 +109,10 @@ prepared statements. Add `?sslmode=require`.
 - Every manifest `*_hash` must reference an `Artifact` returned in `ProcessOutput`
   (`Artifact::new` computes the BLAKE3 hash).
 - Material names must survive into the GLB — the viewer applies texture variants by material name.
+- Manual material settings live in the version tree as `.hangar/materials.json`
+  (`hangar_core::MaterialConfig`): base slot assignments override automatic resolution, skins become
+  `detected_by: "manual"` variants. The web "Materiais" tab edits it and commits a new version; the
+  viewer's live preview must mirror the GLB export's factor rules (`viewer/variants.rs`).
 - Recoverable problems go to `manifest.warnings`, not errors. Fail only when nothing can be previewed.
 - Heuristics (texture resolution, slot tokens, variant detection, LOD suffixes) are unit-tested in
   their modules; extend those tests when changing them.
@@ -141,7 +145,6 @@ prepared statements. Add `?sslmode=require`.
 
 ## Known gaps / next steps
 
-- Variant overrides are auto-detected only; no API to edit them manually yet.
 - No DDS/PSD/EXR texture previews; animation/skinning is counted but not previewed; GLB export
   flattens the node hierarchy.
 - Blender fallback is implemented but was never run against a real Blender in CI.

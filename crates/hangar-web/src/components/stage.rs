@@ -4,7 +4,7 @@
 use crate::api;
 use crate::components::viewer_panel::ViewerPanel;
 use crate::util::fmt_bytes;
-use hangar_core::{PreviewKind, VersionDto, VersionStatus, blob_url};
+use hangar_core::{PreviewKind, TextureOverride, VersionDto, VersionStatus, blob_url};
 use leptos::prelude::*;
 use uuid::Uuid;
 
@@ -40,13 +40,15 @@ pub fn Stage(
     can_write: Signal<bool>,
     on_reprocess: Callback<Uuid>,
     on_upload: Callback<()>,
+    /// Unsaved material assignments previewed in the 3D viewer.
+    draft: Signal<Option<Vec<TextureOverride>>>,
 ) -> impl IntoView {
     // Only re-render the stage when the *kind* of preview changes, so the Bevy
     // canvas survives switching between versions / LODs of the same asset.
     let mode = Memo::new(move |_| mode_of(&version.get()));
 
     move || match mode.get() {
-        Mode::Model => view! { <ViewerPanel version=version asset_id=asset_id /> }.into_any(),
+        Mode::Model => view! { <ViewerPanel version=version asset_id=asset_id draft=draft /> }.into_any(),
         Mode::Image => view! { <TextureGallery version=version /> }.into_any(),
         Mode::Audio => view! { <AudioPlayer version=version /> }.into_any(),
         Mode::Processing => view! {

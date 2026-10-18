@@ -2,8 +2,8 @@
 //! the (often broken) texture paths stored inside model files.
 
 use crate::scene::{Material, TexSource};
-use hangar_core::{paths, TextureSlot};
-use std::collections::{BTreeMap, HashMap};
+use hangar_core::{paths, MaterialConfig, TextureSlot, MATERIAL_CONFIG_PATH};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// Splits a string on `/ \ _ - . space` and camelCase boundaries are NOT split
 /// (artists use `BaseColor`, which we handle as a single token).
@@ -79,6 +79,11 @@ pub fn detect_slot(path: &str) -> Option<TextureSlot> {
 
 /// Handles glued suffixes such as `TankNormal`, `body_BaseColorMap`.
 fn detect_compound_slot(token: &str) -> Option<TextureSlot> {
+    compound_slot(token).map(|(_, slot)| slot)
+}
+
+/// The glued slot suffix of `token` and its slot.
+fn compound_slot(token: &str) -> Option<(&'static str, TextureSlot)> {
     let t = token.to_ascii_lowercase();
     const SUFFIXES: &[(&str, TextureSlot)] = &[
         ("basecolor", TextureSlot::BaseColor),
@@ -93,10 +98,7 @@ fn detect_compound_slot(token: &str) -> Option<TextureSlot> {
         ("height", TextureSlot::Height),
         ("opacity", TextureSlot::Opacity),
     ];
-    SUFFIXES
-        .iter()
-        .find(|(s, _)| t.len() > s.len() && t.ends_with(s))
-        .map(|(_, slot)| *slot)
+    SUFFIXES.iter().find(|(s, _)| t.len() > s.len() && t.ends_with(s)).copied()
 }
 
 /// Index of all image files of a version, for name based lookups.
@@ -121,6 +123,31 @@ impl ImageIndex {
 
     pub fn contains(&self, path: &str) -> bool {
         self.by_lower_path.contains_key(&path.to_ascii_lowercase())
+    }
+
+    /// The version path of an image given by its version-relative path (case-insensitive).
+    pub fn find(&self, path: &str) -> Option<String> {
+        let n = paths::normalize(path)?;
+        self.by_lower_path.get(&n.to_ascii_lowercase()).cloned()
+    }
+
+    /// Fallback for a reference whose file was renamed: the image with the same
+    /// slot and the same number tokens (UDIM tile, part number). Ties go to the
+    /// candidate sharing most name tokens with the original, then alphabetical.
+    pub fn resolve_tile(&self, original: &str, slot: TextureSlot) -> Option<String> {
+        let cleaned = clean_original(original);
+        let numbers = number_tokens(&cleaned);
+        if numbers.is_empty() {
+            return None;
+        }
+        let orig: HashSet<String> =
+            tokenize(paths::stem(&cleaned)).into_iter().map(|t| t.to_ascii_lowercase()).collect();
+        let shared = |p: &str| tokenize(paths::stem(p)).iter().filter(|t| orig.contains(&t.to_ascii_lowercase())).count();
+        self.images
+            .iter()
+            .filter(|p| detect_slot(p) == Some(slot) && number_tokens(p) == numbers)
+            .max_by(|a, b| shared(a).cmp(&shared(b)).then_with(|| b.cmp(a)))
+            .cloned()
     }
 
     /// Resolve a path written inside a model file. Returns the version path
@@ -253,9 +280,22 @@ pub struct ResolvedTexture {
     pub resolved_by: &'static str,
 }
 
-/// Resolve every texture of every material. Missing slots are filled with
-/// the material-name heuristic.
-pub fn resolve_materials(materials: &[Material], index: &ImageIndex, warnings: &mut Vec<String>) -> Vec<Vec<ResolvedTexture>> {
+/// Resolve every texture of every material, in order of precedence:
+///
+/// 1. references stored in the model (exact path, file name, same stem);
+/// 2. for a missing reference, the only image with the same slot and the same
+///    tile / number tokens (`low1_BaseColor.1001.png` → `Tank_BaseColor.1001.png`);
+/// 3. manual assignments from [`MaterialConfig`] — they override 1 and 2, and a
+///    `null` assignment keeps the slot empty;
+/// 4. material-name heuristic for slots still empty;
+/// 5. siblings of an already resolved texture: same folder and name except
+///    for the slot token (`Tank_BaseColor.1001` → `Tank_Normal.1001`).
+pub fn resolve_materials(
+    materials: &[Material],
+    index: &ImageIndex,
+    manual: Option<&MaterialConfig>,
+    warnings: &mut Vec<String>,
+) -> Vec<Vec<ResolvedTexture>> {
     let mut out: Vec<Vec<ResolvedTexture>> = Vec::with_capacity(materials.len());
     for mat in materials {
         let mut list: Vec<ResolvedTexture> = Vec::new();
@@ -265,23 +305,16 @@ pub fn resolve_materials(materials: &[Material], index: &ImageIndex, warnings: &
             }
             match &tex.source {
                 TexSource::Path { original, base_dir } => {
-                    if let Some((p, how)) = index.resolve(original, base_dir) {
-                        list.push(ResolvedTexture {
-                            slot: tex.slot,
-                            path: Some(p),
-                            embedded: None,
-                            original: Some(original.clone()),
-                            resolved_by: how,
-                        });
-                    } else {
-                        list.push(ResolvedTexture {
-                            slot: tex.slot,
-                            path: None,
-                            embedded: None,
-                            original: Some(original.clone()),
-                            resolved_by: "missing",
-                        });
-                    }
+                    let found = index
+                        .resolve(original, base_dir)
+                        .or_else(|| index.resolve_tile(original, tex.slot).map(|p| (p, "slot-tile")));
+                    list.push(ResolvedTexture {
+                        slot: tex.slot,
+                        path: found.as_ref().map(|(p, _)| p.clone()),
+                        embedded: None,
+                        original: Some(original.clone()),
+                        resolved_by: found.map(|(_, how)| how).unwrap_or("missing"),
+                    });
                 }
                 TexSource::Embedded { name, bytes } => {
                     // Prefer the loose file with the same name when the pack ships it
@@ -309,6 +342,47 @@ pub fn resolve_materials(materials: &[Material], index: &ImageIndex, warnings: &
         out.push(list);
     }
 
+    // Manual assignments.
+    let mut cleared: Vec<HashSet<TextureSlot>> = vec![HashSet::new(); materials.len()];
+    if let Some(cfg) = manual {
+        for name in cfg.materials.keys() {
+            if !materials.iter().any(|m| m.name.eq_ignore_ascii_case(name)) {
+                warnings.push(format!("{MATERIAL_CONFIG_PATH}: material '{name}' does not exist in the model"));
+            }
+        }
+        for (mi, mat) in materials.iter().enumerate() {
+            let Some(assignments) = cfg.assignments(&mat.name) else { continue };
+            for (&slot, value) in assignments {
+                match value {
+                    Some(path) => match index.find(path) {
+                        Some(p) => {
+                            // A manual choice also displaces automatic textures of an
+                            // overlapping slot (manual roughness beats an ORM found by name).
+                            out[mi].retain(|r| {
+                                !(r.slot == slot || (r.resolved_by != "manual" && overlaps(slot, r.slot)))
+                            });
+                            out[mi].push(ResolvedTexture {
+                                slot,
+                                path: Some(p),
+                                embedded: None,
+                                original: None,
+                                resolved_by: "manual",
+                            });
+                        }
+                        None => warnings.push(format!(
+                            "material '{}': manual {slot} texture '{path}' not found in the version",
+                            mat.name
+                        )),
+                    },
+                    None => {
+                        out[mi].retain(|r| r.slot != slot);
+                        cleared[mi].insert(slot);
+                    }
+                }
+            }
+        }
+    }
+
     // Material-name heuristic for materials without a resolved base colour.
     let cores: Vec<Vec<String>> = materials.iter().map(|m| material_core(&m.name)).collect();
     // Assign each image to the material with the longest matching core.
@@ -326,12 +400,9 @@ pub fn resolve_materials(materials: &[Material], index: &ImageIndex, warnings: &
     }
     let single_material = materials.len() == 1;
     for mi in 0..materials.len() {
-        let has = |slot: TextureSlot, list: &Vec<ResolvedTexture>| {
-            list.iter().any(|r| r.slot == slot && (r.path.is_some() || r.embedded.is_some()))
-        };
         let mut candidates: Vec<&String> = by_material[mi].clone();
         let mut how = "material-name";
-        if candidates.is_empty() && single_material && !has(TextureSlot::BaseColor, &out[mi]) {
+        if candidates.is_empty() && single_material && !covered(&out[mi], &cleared[mi], TextureSlot::BaseColor) {
             candidates = index.images.iter().collect();
             how = "single-material";
         }
@@ -339,18 +410,8 @@ pub fn resolve_materials(materials: &[Material], index: &ImageIndex, warnings: &
             continue;
         }
         let core_len = cores[mi].len();
-        for slot in [
-            TextureSlot::BaseColor,
-            TextureSlot::Normal,
-            TextureSlot::Orm,
-            TextureSlot::MetallicRoughness,
-            TextureSlot::Roughness,
-            TextureSlot::Metallic,
-            TextureSlot::Occlusion,
-            TextureSlot::Emissive,
-            TextureSlot::Opacity,
-        ] {
-            if has(slot, &out[mi]) {
+        for &slot in HEURISTIC_SLOTS {
+            if covered(&out[mi], &cleared[mi], slot) {
                 continue;
             }
             // Only fill the slot if nothing else was found for it.
@@ -358,18 +419,28 @@ pub fn resolve_materials(materials: &[Material], index: &ImageIndex, warnings: &
             // Fewest extra tokens first, then alphabetical.
             matching.sort_by_key(|p| (image_core(p).len().saturating_sub(core_len), (**p).clone()));
             if let Some(p) = matching.first() {
-                // Replace a "missing" record for the same slot if present.
-                out[mi].retain(|r| !(r.slot == slot && r.path.is_none() && r.embedded.is_none()));
-                out[mi].push(ResolvedTexture {
-                    slot,
-                    path: Some((**p).clone()),
-                    embedded: None,
-                    original: None,
-                    resolved_by: how,
-                });
+                fill(&mut out[mi], slot, (**p).clone(), how);
             }
         }
     }
+
+    // Texture-set siblings of what is already resolved (base colour first).
+    for mi in 0..materials.len() {
+        let mut anchors: Vec<(TextureSlot, String)> =
+            out[mi].iter().filter_map(|r| r.path.clone().map(|p| (r.slot, p))).collect();
+        anchors.sort_by_key(|(slot, _)| *slot != TextureSlot::BaseColor);
+        let Some(key) = anchors.iter().find_map(|(_, p)| set_key(p)) else { continue };
+        for &slot in HEURISTIC_SLOTS {
+            if covered(&out[mi], &cleared[mi], slot) {
+                continue;
+            }
+            let sibling = index.images.iter().find(|p| detect_slot(p) == Some(slot) && set_key(p).as_ref() == Some(&key));
+            if let Some(p) = sibling {
+                fill(&mut out[mi], slot, p.clone(), "sibling");
+            }
+        }
+    }
+
     for (mat, list) in materials.iter().zip(&out) {
         for r in list {
             if r.resolved_by == "missing" {
@@ -383,6 +454,73 @@ pub fn resolve_materials(materials: &[Material], index: &ImageIndex, warnings: &
         }
     }
     out
+}
+
+/// Slots the heuristics try to fill, in priority order.
+const HEURISTIC_SLOTS: &[TextureSlot] = &[
+    TextureSlot::BaseColor,
+    TextureSlot::Normal,
+    TextureSlot::Orm,
+    TextureSlot::MetallicRoughness,
+    TextureSlot::Roughness,
+    TextureSlot::Metallic,
+    TextureSlot::Occlusion,
+    TextureSlot::Emissive,
+    TextureSlot::Opacity,
+];
+
+/// Whether two different slots feed the same glTF channels, so only one of
+/// them can be used (an ORM map already provides roughness, metallic and AO).
+fn overlaps(a: TextureSlot, b: TextureSlot) -> bool {
+    use TextureSlot::*;
+    let pair = |x, y| (a == x && b == y) || (a == y && b == x);
+    pair(Orm, MetallicRoughness)
+        || pair(Orm, Roughness)
+        || pair(Orm, Metallic)
+        || pair(Orm, Occlusion)
+        || pair(MetallicRoughness, Roughness)
+        || pair(MetallicRoughness, Metallic)
+}
+
+/// Whether `slot` already has a texture (directly or through an overlapping
+/// slot) or was explicitly left empty.
+fn covered(list: &[ResolvedTexture], cleared: &HashSet<TextureSlot>, slot: TextureSlot) -> bool {
+    cleared.contains(&slot)
+        || list
+            .iter()
+            .any(|r| (r.path.is_some() || r.embedded.is_some()) && (r.slot == slot || overlaps(slot, r.slot)))
+}
+
+/// Fill `slot` with a heuristic match, replacing its "missing" record if any.
+fn fill(list: &mut Vec<ResolvedTexture>, slot: TextureSlot, path: String, how: &'static str) {
+    list.retain(|r| !(r.slot == slot && r.path.is_none() && r.embedded.is_none()));
+    list.push(ResolvedTexture { slot, path: Some(path), embedded: None, original: None, resolved_by: how });
+}
+
+/// Identity of the texture set an image belongs to: its folder plus the stem
+/// tokens without the slot token and noise. `Tank_BaseColor.1001.png` and
+/// `Tank_Normal.1001.png` share `"|tank 1001"`. None when no slot token is found.
+pub fn set_key(path: &str) -> Option<String> {
+    let mut toks: Vec<String> = tokenize(paths::stem(path)).into_iter().map(|t| t.to_ascii_lowercase()).collect();
+    let i = toks.iter().rposition(|t| !is_noise_token(t) && !t.chars().all(|c| c.is_ascii_digit()))?;
+    if slot_from_token(&toks[i]).is_some() {
+        toks.remove(i);
+    } else {
+        let (suffix, _) = compound_slot(&toks[i])?;
+        let keep = toks[i].len() - suffix.len();
+        toks[i].truncate(keep);
+    }
+    toks.retain(|t| !is_noise_token(t));
+    Some(format!("{}|{}", paths::parent(path).to_ascii_lowercase(), toks.join(" ")))
+}
+
+/// All-digit tokens of a file stem that are not texture sizes (UDIM tiles,
+/// part numbers): `low1_BaseColor.1001` → `["1001"]`.
+fn number_tokens(path: &str) -> Vec<String> {
+    tokenize(paths::stem(path))
+        .into_iter()
+        .filter(|t| t.chars().all(|c| c.is_ascii_digit()) && !is_resolution_token(t))
+        .collect()
 }
 
 fn looks_like_file_name(name: &str) -> bool {
@@ -443,7 +581,7 @@ mod tests {
         ]);
         let mats = vec![Material::named("M_Abrams"), Material::named("M_Abrams_Tracks")];
         let mut w = vec![];
-        let r = resolve_materials(&mats, &idx, &mut w);
+        let r = resolve_materials(&mats, &idx, None, &mut w);
         let body_d = r[0].iter().find(|t| t.slot == TextureSlot::BaseColor).unwrap();
         assert_eq!(body_d.path.as_deref(), Some("T_Abrams_Desert_D.png"));
         let body_n = r[0].iter().find(|t| t.slot == TextureSlot::Normal).unwrap();
@@ -461,8 +599,88 @@ mod tests {
             source: TexSource::Path { original: "C:/x/foo.png".into(), base_dir: String::new() },
         });
         let mut w = vec![];
-        let r = resolve_materials(&[m], &idx, &mut w);
+        let r = resolve_materials(&[m], &idx, None, &mut w);
         assert_eq!(r[0][0].resolved_by, "missing");
         assert_eq!(w.len(), 1);
+    }
+
+    fn with_ref(name: &str, slot: TextureSlot, original: &str) -> Material {
+        let mut m = Material::named(name);
+        m.textures.push(TexRef { slot, source: TexSource::Path { original: original.into(), base_dir: String::new() } });
+        m
+    }
+
+    fn path_of(list: &[ResolvedTexture], slot: TextureSlot) -> Option<(&str, &str)> {
+        list.iter().find(|r| r.slot == slot).and_then(|r| r.path.as_deref().map(|p| (p, r.resolved_by)))
+    }
+
+    /// Renamed UDIM-style tiles: references point at `low1_standardSurface2_*`,
+    /// the pack ships `Tank_*`; material names (`a1`) carry no information.
+    #[test]
+    fn renamed_tiles_and_siblings() {
+        let mut images = vec![];
+        for tile in ["1001", "1002"] {
+            for slot in ["BaseColor", "Normal", "Metallic", "Roughness", "Emissive"] {
+                images.push(format!("Tank_{slot}.{tile}.png"));
+            }
+        }
+        let idx = ImageIndex::new(images);
+        let mats = vec![
+            with_ref("a1", TextureSlot::BaseColor, r"..\..\Png\low1_standardSurface2_BaseColor.1001.png"),
+            with_ref("a2", TextureSlot::BaseColor, r"..\..\Png\low1_standardSurface2_BaseColor.1002.png"),
+        ];
+        let mut w = vec![];
+        let r = resolve_materials(&mats, &idx, None, &mut w);
+        assert!(w.is_empty(), "{w:?}");
+        assert_eq!(path_of(&r[0], TextureSlot::BaseColor), Some(("Tank_BaseColor.1001.png", "slot-tile")));
+        assert_eq!(path_of(&r[1], TextureSlot::BaseColor), Some(("Tank_BaseColor.1002.png", "slot-tile")));
+        assert_eq!(path_of(&r[0], TextureSlot::Normal), Some(("Tank_Normal.1001.png", "sibling")));
+        assert_eq!(path_of(&r[0], TextureSlot::Roughness), Some(("Tank_Roughness.1001.png", "sibling")));
+        assert_eq!(path_of(&r[1], TextureSlot::Metallic), Some(("Tank_Metallic.1002.png", "sibling")));
+        assert_eq!(path_of(&r[1], TextureSlot::Emissive), Some(("Tank_Emissive.1002.png", "sibling")));
+        // No number in the reference: the tile fallback must not guess.
+        assert!(idx.resolve_tile("other_BaseColor.png", TextureSlot::BaseColor).is_none());
+    }
+
+    #[test]
+    fn manual_assignments_win() {
+        let idx = ImageIndex::new(vec![
+            "T_Body_D.png".into(),
+            "T_Body_ORM.png".into(),
+            "T_Body_N.png".into(),
+            "Alt/Body_Rough.png".into(),
+            "Alt/Body_Color.png".into(),
+        ]);
+        let mats = vec![Material::named("M_Body")];
+        let cfg = MaterialConfig::from_json(
+            br#"{ "materials": {
+                "m_body": { "base_color": "Alt/Body_Color.png", "roughness": "alt/body_rough.png", "normal": null },
+                "Ghost": { "base_color": "T_Body_D.png" }
+            } }"#,
+        )
+        .unwrap();
+        let mut w = vec![];
+        let r = resolve_materials(&mats, &idx, Some(&cfg), &mut w);
+        assert_eq!(path_of(&r[0], TextureSlot::BaseColor), Some(("Alt/Body_Color.png", "manual")));
+        assert_eq!(path_of(&r[0], TextureSlot::Roughness), Some(("Alt/Body_Rough.png", "manual")));
+        // Cleared slot stays empty; the ORM found by name is displaced by the manual roughness.
+        assert!(r[0].iter().all(|t| t.slot != TextureSlot::Normal && t.slot != TextureSlot::Orm), "{:?}", r[0]);
+        assert!(w.iter().any(|m| m.contains("'Ghost'")), "{w:?}");
+
+        let bad = MaterialConfig::from_json(br#"{ "materials": { "M_Body": { "base_color": "nope.png" } } }"#).unwrap();
+        let mut w = vec![];
+        let r = resolve_materials(&mats, &idx, Some(&bad), &mut w);
+        assert!(w.iter().any(|m| m.contains("nope.png")), "{w:?}");
+        // Falls back to the automatic match.
+        assert_eq!(path_of(&r[0], TextureSlot::BaseColor).map(|(_, how)| how), Some("material-name"));
+    }
+
+    #[test]
+    fn texture_set_keys() {
+        assert_eq!(set_key("Tank_BaseColor.1001.png"), set_key("Tank_Normal.1001.png"));
+        assert_ne!(set_key("Tank_BaseColor.1001.png"), set_key("Tank_Normal.1002.png"));
+        assert_eq!(set_key("a/TankBaseColor.png"), set_key("a/Tank_Normal_4k.png"));
+        assert_ne!(set_key("a/Tank_D.png"), set_key("b/Tank_N.png"));
+        assert_eq!(set_key("logo.png"), None);
     }
 }

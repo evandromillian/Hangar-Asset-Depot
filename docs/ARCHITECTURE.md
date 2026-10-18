@@ -76,12 +76,16 @@ relevantes (modelos, imagens, áudio) para um diretório temporário e chama
    Formatos não suportados nativamente (ex.: `.blend`) ou falhas caem no **fallback do
    Blender headless** (`tools/blender/export_glb.py`), quando configurado.
 3. **Resolução de texturas** — FBX comprados costumam apontar para `C:\Users\artista\...`.
-   O pipeline tenta: caminho exato → mesmo nome de arquivo em qualquer pasta → nome do
-   material (`M_Body` ↔ `T_Body_BaseColor.png`) com detecção do slot pelo sufixo
-   (`_D`, `_BaseColor`, `_N`, `_ORM`, `_R`, `_M`, `_AO`, `_E`...).
+   O pipeline tenta, em ordem: caminho exato → mesmo nome de arquivo em qualquer pasta →
+   mesmo slot e mesmos números/tiles (`low1_BaseColor.1001.png` → `Tank_BaseColor.1001.png`)
+   → **atribuição manual** (`.hangar/materials.json`, ver abaixo) → nome do material
+   (`M_Body` ↔ `T_Body_BaseColor.png`) → "irmãos" de uma textura já resolvida (mesma pasta e
+   nome, só o slot muda: `Tank_BaseColor.1001` → `Tank_Normal.1001`). O slot é detectado
+   pelo sufixo (`_D`, `_BaseColor`, `_N`, `_ORM`, `_R`, `_M`, `_AO`, `_E`...).
 4. **Variantes de textura** — dois arquivos que diferem em um único token que não é um slot
-   (`Desert/T_Body_D.png` × `Woodland/T_Body_D.png`, ou `T_Body_Desert_D` ×
+   nem um número (`Desert/T_Body_D.png` × `Woodland/T_Body_D.png`, ou `T_Body_Desert_D` ×
    `T_Body_Woodland_D`) formam variantes. A primeira referenciada pelo modelo é a padrão.
+   Skins manuais de `.hangar/materials.json` entram com `detected_by: "manual"`.
 5. **LODs** — autorais (por nome) ou gerados com `meshopt::simplify` (50% / 25% / 10% por
    padrão), cada um exportado como **GLB autocontido** com texturas reduzidas.
 6. **Thumbnail** — rasterizador em software (z-buffer + Lambert + textura base) gera um
@@ -91,6 +95,31 @@ relevantes (modelos, imagens, áudio) para um diretório temporário e chama
 
 O resultado é um `PreviewManifest` (JSON em `asset_versions.preview`) + blobs gerados
 (registrados em `renditions`). O viewer só consome GLB e imagens web.
+
+### Materiais manuais (`.hangar/materials.json`)
+
+Quando a heurística não basta, a aba **Materiais** da página do asset permite escolher a
+textura de cada slot de cada material e criar **skins** (conjuntos alternativos). As
+alterações aparecem na hora no viewer (pré-visualização) e, ao salvar, viram uma **nova
+versão** que herda a anterior e acrescenta só este arquivo — nenhuma textura é reenviada:
+
+```json
+{
+  "materials": {
+    "a1": { "base_color": "Tank_BaseColor.1001.png", "normal": null }
+  },
+  "skins": [
+    { "name": "Deserto", "materials": { "a1": { "base_color": "Desert/Tank_BaseColor.1001.png" } } }
+  ]
+}
+```
+
+* `materials`: slot → caminho força a textura; `null` força o slot vazio; slots ausentes
+  continuam automáticos. Nomes de material são comparados sem diferenciar maiúsculas.
+* `skins`: cada skin lista só o que muda em relação à base.
+* O pipeline aplica a base nos GLBs e na thumbnail; problemas (material ou arquivo
+  inexistente) viram `warnings`. A CLI envia o arquivo quando ele existe na pasta, e
+  `--mirror` nunca o apaga.
 
 ## Viewer 3D
 

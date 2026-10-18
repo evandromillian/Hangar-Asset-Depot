@@ -3,7 +3,7 @@
 use crate::api;
 use crate::util::{fmt_bytes, fmt_compact, fmt_int};
 use crate::viewer::{self, CANVAS_ID, VariantTexture, ViewerCommand, ViewerEvent};
-use hangar_core::{LodSource, VersionDto};
+use hangar_core::{LodSource, TextureOverride, VersionDto};
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use leptos_bevy_canvas::prelude::*;
@@ -63,6 +63,10 @@ pub fn ViewerPanel(
     /// Selected (ready) version.
     version: Signal<Option<VersionDto>>,
     asset_id: Signal<Uuid>,
+    /// Unsaved texture assignments from the materials panel; while set, they
+    /// replace the selected skin in the viewer.
+    #[prop(into)]
+    draft: Signal<Option<Vec<TextureOverride>>>,
 ) -> impl IntoView {
     let (cmd_tx, cmd_rx) = message_l2b::<ViewerCommand>();
     let (evt_rx, evt_tx) = message_b2l::<ViewerEvent>();
@@ -77,6 +81,7 @@ pub fn ViewerPanel(
     let error = RwSignal::new(None::<String>);
     let loaded_tris = RwSignal::new(None::<usize>);
     let request_seq = StoredValue::new(0u64);
+    let variant_seq = StoredValue::new(0u64);
 
     let preview = Memo::new(move |_| version.get().and_then(|v| v.preview));
 
@@ -126,18 +131,27 @@ pub fn ViewerPanel(
         });
     });
 
-    // Apply / reset the texture variant.
+    // Apply / reset the texture variant, or the unsaved draft of the materials panel.
     let tx = cmd_tx.clone();
     Effect::new(move |_| {
         let cmd_tx = tx.clone();
         let Some(p) = preview.get() else { return };
-        let name = variant.get();
-        let chosen = name.and_then(|n| p.variants.iter().find(|v| v.name == n).cloned());
-        match chosen {
-            Some(v) if !v.is_default && !v.overrides.is_empty() => {
+        let overrides = match draft.get() {
+            Some(d) => Some(d),
+            None => variant
+                .get()
+                .and_then(|n| p.variants.into_iter().find(|v| v.name == n))
+                .filter(|v| !v.is_default && !v.overrides.is_empty())
+                .map(|v| v.overrides),
+        };
+        // Downloads finish out of order; only the latest request may apply.
+        let seq = variant_seq.get_value() + 1;
+        variant_seq.set_value(seq);
+        match overrides.filter(|o| !o.is_empty()) {
+            Some(overrides) => {
                 spawn_local(async move {
                     let mut textures = Vec::new();
-                    for o in v.overrides {
+                    for o in overrides {
                         match fetch_blob(cache, o.preview_hash.clone()).await {
                             Ok(bytes) => textures.push(VariantTexture {
                                 material: o.material,
@@ -148,10 +162,12 @@ pub fn ViewerPanel(
                             Err(e) => error.set(Some(format!("Textura da variante: {e}"))),
                         }
                     }
-                    cmd_tx.send(ViewerCommand::ApplyVariant { textures }).ok();
+                    if variant_seq.get_value() == seq {
+                        cmd_tx.send(ViewerCommand::ApplyVariant { textures }).ok();
+                    }
                 });
             }
-            _ => {
+            None => {
                 cmd_tx.send(ViewerCommand::ResetVariant).ok();
             }
         }
@@ -241,7 +257,14 @@ pub fn ViewerPanel(
                             })
                     }}
                 </div>
-                <Show when=move || preview.get().map(|p| p.variants.len() > 1).unwrap_or(false)>
+                <Show when=move || draft.with(|d| d.is_some())>
+                    <div class="tool-group">
+                        <span class="pill pill-accent" title="Alterações de materiais ainda não salvas">"pré-visualização"</span>
+                    </div>
+                </Show>
+                <Show when=move || {
+                    draft.with(|d| d.is_none()) && preview.get().map(|p| p.variants.len() > 1).unwrap_or(false)
+                }>
                     <div class="tool-group">
                         <span class="tool-label">"Skin"</span>
                         {move || {

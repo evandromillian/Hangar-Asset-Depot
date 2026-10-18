@@ -1,7 +1,7 @@
 //! End-to-end test: a procedurally generated "tank" (OBJ + MTL + textures in
 //! Desert / Woodland folders) goes through the whole pipeline.
 
-use hangar_core::{FileEntry, LodSource, PreviewKind, TextureSlot};
+use hangar_core::{FileEntry, LodSource, PreviewKind, TextureSlot, MATERIAL_CONFIG_PATH};
 use hangar_pipeline::{process, ArtifactRole, PipelineConfig, ProcessInput};
 use std::collections::HashSet;
 use std::fmt::Write as _;
@@ -208,6 +208,50 @@ fn processes_tank_end_to_end() {
     let dims = s.dimensions();
     assert!(dims[2] > 6.0 && dims[1] > 1.0, "dims {dims:?}");
     assert!(m.warnings.is_empty(), "warnings: {:?}", m.warnings);
+}
+
+/// `.hangar/materials.json` assigns a texture to the untextured barrel and
+/// defines a manual skin; both must reach the manifest and the GLB.
+#[test]
+fn manual_material_config() {
+    let dir = tempfile::tempdir().unwrap();
+    make_tank(dir.path());
+    write_png(&dir.path().join("Textures/Snow/Body_Snow.png"), [235, 235, 240]);
+    write_png(&dir.path().join("Textures/Barrel_Steel.png"), [90, 92, 95]);
+    std::fs::create_dir_all(dir.path().join(".hangar")).unwrap();
+    std::fs::write(
+        dir.path().join(MATERIAL_CONFIG_PATH),
+        r#"{
+            "materials": { "M_Tank_Barrel": { "base_color": "Textures/Barrel_Steel.png" } },
+            "skins": [ { "name": "Neve", "materials": { "M_Tank_Body": { "base_color": "Textures/Snow/Body_Snow.png" } } } ]
+        }"#,
+    )
+    .unwrap();
+    let files = entries(dir.path());
+    assert!(files.iter().any(|f| f.path == MATERIAL_CONFIG_PATH && hangar_pipeline::is_relevant(&f.path)));
+    let res = process(&ProcessInput { root: dir.path(), files: &files }, &PipelineConfig::default()).unwrap();
+    let m = &res.manifest;
+    assert!(m.warnings.is_empty(), "warnings: {:?}", m.warnings);
+
+    let barrel = m.materials.iter().find(|x| x.name == "M_Tank_Barrel").unwrap();
+    let bc = barrel.textures.iter().find(|t| t.slot == TextureSlot::BaseColor).unwrap();
+    assert_eq!(bc.path.as_deref(), Some("Textures/Barrel_Steel.png"));
+    assert_eq!(bc.resolved_by, "manual");
+
+    let snow = m.variants.iter().find(|v| v.name == "Neve").expect("manual skin");
+    assert_eq!(snow.detected_by, "manual");
+    assert!(!snow.is_default);
+    assert_eq!(snow.overrides.len(), 1);
+    assert_eq!(snow.overrides[0].material, "M_Tank_Body");
+    let hashes: HashSet<&str> = res.artifacts.iter().map(|a| a.hash.as_str()).collect();
+    assert!(hashes.contains(snow.overrides[0].preview_hash.as_str()));
+    // Automatic variants are kept next to the manual skin.
+    assert!(m.variants.iter().any(|v| v.name == "Woodland"));
+
+    let glb = res.artifacts.iter().find(|a| a.role == ArtifactRole::LodGlb(0)).unwrap();
+    let g = gltf::Gltf::from_slice(&glb.bytes).unwrap();
+    let mat = g.materials().find(|x| x.name() == Some("M_Tank_Barrel")).unwrap();
+    assert!(mat.pbr_metallic_roughness().base_color_texture().is_some(), "barrel texture baked into the GLB");
 }
 
 #[test]

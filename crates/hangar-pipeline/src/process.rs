@@ -11,7 +11,7 @@ use crate::{import, Artifact, ArtifactRole, PipelineConfig, ProcessInput, Proces
 use anyhow::{anyhow, Result};
 use hangar_core::{
     paths, LodInfo, MaterialInfo, MaterialTexture, ModelStats, PreviewKind, PreviewManifest, TextureInfo,
-    TextureOverride, TextureSlot, VariantInfo, PIPELINE_VERSION,
+    MaterialConfig, TextureOverride, TextureSlot, VariantInfo, MATERIAL_CONFIG_PATH, PIPELINE_VERSION,
 };
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
@@ -43,6 +43,7 @@ pub fn run(input: &ProcessInput, cfg: &PipelineConfig) -> Result<ProcessOutput> 
     let mut manifest = PreviewManifest { pipeline_version: PIPELINE_VERSION, ..Default::default() };
     let mut warnings: Vec<String> = Vec::new();
     let mut cache = ImageCache::new(cfg.max_texture_size);
+    let manual = load_material_config(input, &files, &mut warnings);
 
     // ---- texture previews -------------------------------------------------
     let mut preview_by_path: HashMap<String, String> = HashMap::new();
@@ -90,7 +91,8 @@ pub fn run(input: &ProcessInput, cfg: &PipelineConfig) -> Result<ProcessOutput> 
                 sel.ignored.iter().take(5).cloned().collect::<Vec<_>>().join(", ")
             ));
         }
-        match build_model(input, cfg, &sel, &images, &preview_by_path, &mut cache, &mut out, &mut manifest, &mut warnings) {
+        let ctx = ModelInputs { sel: &sel, images: &images, preview_by_path: &preview_by_path, manual: manual.as_ref() };
+        match build_model(input, cfg, &ctx, &mut cache, &mut out, &mut manifest, &mut warnings) {
             Ok(()) => model_done = true,
             Err(e) => {
                 if images.is_empty() && audio.is_empty() {
@@ -202,18 +204,43 @@ fn merge_materials(dst: &mut Vec<Material>, src: &[Material]) -> Vec<usize> {
         .collect()
 }
 
-#[allow(clippy::too_many_arguments)]
+/// Reads `.hangar/materials.json` when the version has one. A broken file is a
+/// warning: the model is still previewed with automatic resolution.
+fn load_material_config(
+    input: &ProcessInput,
+    files: &[&hangar_core::FileEntry],
+    warnings: &mut Vec<String>,
+) -> Option<MaterialConfig> {
+    files.iter().find(|f| f.path == MATERIAL_CONFIG_PATH)?;
+    let parsed = std::fs::read(input.root.join(MATERIAL_CONFIG_PATH))
+        .map_err(anyhow::Error::from)
+        .and_then(|b| MaterialConfig::from_json(&b).map_err(anyhow::Error::from));
+    match parsed {
+        Ok(c) => Some(c),
+        Err(e) => {
+            warnings.push(format!("{MATERIAL_CONFIG_PATH} ignored: {e:#}"));
+            None
+        }
+    }
+}
+
+struct ModelInputs<'a> {
+    sel: &'a ModelSelection,
+    images: &'a [String],
+    preview_by_path: &'a HashMap<String, String>,
+    manual: Option<&'a MaterialConfig>,
+}
+
 fn build_model(
     input: &ProcessInput,
     cfg: &PipelineConfig,
-    sel: &ModelSelection,
-    images: &[String],
-    preview_by_path: &HashMap<String, String>,
+    ctx: &ModelInputs,
     cache: &mut ImageCache,
     out: &mut Out,
     manifest: &mut PreviewManifest,
     warnings: &mut Vec<String>,
 ) -> Result<()> {
+    let ModelInputs { sel, images, preview_by_path, manual } = *ctx;
     let scene: Scene = import::import(input.root, &sel.primary, cfg)?;
     warnings.extend(scene.warnings.iter().cloned());
     let mut materials = scene.materials.clone();
@@ -255,7 +282,7 @@ fn build_model(
 
     // ---- textures
     let index = ImageIndex::new(images.to_vec());
-    let resolved = textures::resolve_materials(&materials, &index, warnings);
+    let resolved = textures::resolve_materials(&materials, &index, manual, warnings);
     let used: Vec<UsedTexture> = materials
         .iter()
         .zip(&resolved)
@@ -285,6 +312,9 @@ fn build_model(
                 .collect(),
         })
         .collect();
+    if let Some(cfg) = manual {
+        add_manual_skins(cfg, &materials, &index, preview_by_path, manifest, warnings);
+    }
 
     manifest.materials = materials
         .iter()
@@ -391,6 +421,48 @@ fn build_model(
     manifest.primary_file = Some(sel.primary.clone());
     manifest.importer = Some(scene.importer.to_string());
     Ok(())
+}
+
+/// Appends the skins of `.hangar/materials.json`; a manual skin replaces an
+/// automatically detected variant of the same name.
+fn add_manual_skins(
+    cfg: &MaterialConfig,
+    materials: &[Material],
+    index: &ImageIndex,
+    preview_by_path: &HashMap<String, String>,
+    manifest: &mut PreviewManifest,
+    warnings: &mut Vec<String>,
+) {
+    for skin in &cfg.skins {
+        let name = skin.name.trim();
+        if name.is_empty() || manifest.variants.iter().any(|v| v.is_default && v.name.eq_ignore_ascii_case(name)) {
+            warnings.push(format!("{MATERIAL_CONFIG_PATH}: skin name '{name}' is empty or taken by the default look"));
+            continue;
+        }
+        let mut overrides = Vec::new();
+        for (mat_name, slots) in &skin.materials {
+            let Some(mat) = materials.iter().find(|m| m.name.eq_ignore_ascii_case(mat_name)) else {
+                warnings.push(format!("skin '{name}': material '{mat_name}' does not exist in the model"));
+                continue;
+            };
+            for (&slot, path) in slots {
+                let found = index.find(path).and_then(|p| preview_by_path.get(&p).map(|h| (p, h.clone())));
+                match found {
+                    Some((path, preview_hash)) => {
+                        overrides.push(TextureOverride { material: mat.name.clone(), slot, path, preview_hash })
+                    }
+                    None => warnings.push(format!("skin '{name}': {slot} texture '{path}' not found or not previewable")),
+                }
+            }
+        }
+        manifest.variants.retain(|v| v.is_default || !v.name.eq_ignore_ascii_case(name));
+        manifest.variants.push(VariantInfo {
+            name: name.to_string(),
+            is_default: false,
+            overrides,
+            detected_by: "manual".to_string(),
+        });
+    }
 }
 
 fn decode_resolved(input: &ProcessInput, cache: &mut ImageCache, mat: &str, r: &ResolvedTexture) -> Option<Arc<Decoded>> {
