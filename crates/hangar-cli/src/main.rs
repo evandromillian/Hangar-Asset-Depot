@@ -12,7 +12,8 @@
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Parser, Subcommand};
 use hangar_core::{
-    AssetDetail, AssetKind, AssetSource, AssetSummary, CommitVersionRequest, CreateAssetRequest, FileEntry,
+    AssetDetail, AssetKind, AssetSource, AssetSummary, CommitVersionRequest, CreateAssetRequest,
+    CreateProjectRequest, FileEntry,
     LoginRequest, LoginResponse, MissingBlobsRequest, MissingBlobsResponse, Page, ProjectDto, UserDto, VersionDiff,
     VersionDto, VersionStatus, MATERIAL_CONFIG_PATH, paths,
 };
@@ -51,6 +52,15 @@ enum Cmd {
     Whoami,
     /// List projects.
     Projects,
+    /// Create a project (prints its id).
+    NewProject {
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        slug: Option<String>,
+        #[arg(long)]
+        description: Option<String>,
+    },
     /// List assets of a project.
     Assets {
         project: Uuid,
@@ -80,6 +90,19 @@ enum Cmd {
         author: Option<String>,
         #[arg(long)]
         license: Option<String>,
+    },
+    /// Create an asset with the kind, description, tags and source of SOURCE (prints its id).
+    /// Versions and files are not copied.
+    CloneAsset {
+        source: Uuid,
+        #[arg(long)]
+        name: String,
+        /// Target project (default: the source's).
+        #[arg(long)]
+        project: Option<Uuid>,
+        /// Overrides the source's description.
+        #[arg(long)]
+        description: Option<String>,
     },
     /// Version history of an asset.
     Versions { asset: Uuid },
@@ -231,6 +254,11 @@ fn run() -> Result<()> {
                 println!("{}  {:<28} {:>4} assets  {}", p.id, p.name, p.asset_count, role);
             }
         }
+        Cmd::NewProject { name, slug, description } => {
+            let req = CreateProjectRequest { name, slug, description: description.unwrap_or_default() };
+            let p: ProjectDto = Api::new(server, token)?.post("/api/projects", &req)?;
+            println!("{}", p.id);
+        }
         Cmd::Assets { project, query, kind, tag } => {
             let api = Api::new(server, token)?;
             let mut url = format!("/api/projects/{project}/assets?size=200");
@@ -259,6 +287,21 @@ fn run() -> Result<()> {
                 description: description.unwrap_or_default(),
                 tags,
                 source: AssetSource { vendor, url, author, license, ..Default::default() },
+            };
+            let a: AssetDetail = api.post(&format!("/api/projects/{project}/assets"), &req)?;
+            println!("{}", a.summary.id);
+        }
+        Cmd::CloneAsset { source, name, project, description } => {
+            let api = Api::new(server, token)?;
+            let src: AssetDetail = api.get(&format!("/api/assets/{source}"))?;
+            let project = project.unwrap_or(src.summary.project_id);
+            let req = CreateAssetRequest {
+                name,
+                slug: None,
+                kind: src.summary.kind,
+                description: description.unwrap_or(src.description),
+                tags: src.summary.tags,
+                source: src.source,
             };
             let a: AssetDetail = api.post(&format!("/api/projects/{project}/assets"), &req)?;
             println!("{}", a.summary.id);

@@ -53,6 +53,10 @@ cargo run -p hangar-pipeline --example process_dir -- <asset-dir> <out-dir>
 # CLI
 cargo run -p hangar-cli -- login --server http://localhost:8100 --user <name>
 cargo run -p hangar-cli -- push <asset-id> ./folder -m "message" --mirror --wait
+cargo run -p hangar-cli -- clone-asset <asset-id> --name "New"   # kind/description/tags/source, no versions
+
+# Batch import: each subfolder of -Root → one asset cloned from -Template, v1 = folder; resumable
+.\tools\import-folders.ps1 -Root <package-dir> -Template <asset-id> -AssetPrefix "Name "
 ```
 
 ## Configuration (summer-rs)
