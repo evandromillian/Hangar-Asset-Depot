@@ -6,15 +6,19 @@
 //! re-queued after `STALE_AFTER`.
 
 use crate::config::HangarConfig;
-use crate::entities::{asset_versions, version_files};
+use crate::entities::{asset_versions, assets, version_files};
 use crate::storage::BlobStore;
 use anyhow::Context;
-use hangar_core::{ANIMATION_CONFIG_PATH, AnimationConfig, FileEntry, SkeletonPreview, VersionStatus};
-use hangar_pipeline::{ArtifactRole, PipelineConfig, ProcessInput, SkeletonSource};
+use hangar_core::{
+    ANIMATION_CONFIG_PATH, AnimationConfig, FileEntry, MATERIAL_CONFIG_PATH, MaterialConfig, SkeletonPreview, TextureSetUse,
+    VersionStatus, paths,
+};
+use hangar_pipeline::{ArtifactRole, PipelineConfig, ProcessInput, SkeletonSource, TextureSetSource};
 use sea_orm::{
     ColumnTrait, ConnectionTrait, DatabaseConnection, DbBackend, EntityTrait, FromQueryResult, QueryFilter, Statement,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Notify;
@@ -280,14 +284,46 @@ pub async fn process_version(ctx: &WorkerCtx, version_id: Uuid) -> anyhow::Resul
     }
     let (sources, built_from): (Vec<SkeletonSource>, Vec<SkeletonPreview>) = skeletons.into_iter().unzip();
 
+    // Texture sets of `.hangar/materials.json`: the images of each set's head
+    // version go into the work dir under `@<slug>/`. A broken file is the pipeline's warning.
+    let mut set_sources = Vec::new();
+    let mut set_uses: Vec<TextureSetUse> = Vec::new();
+    if relevant.iter().any(|f| f.path == MATERIAL_CONFIG_PATH) {
+        let bytes = tokio::fs::read(work.path().join(MATERIAL_CONFIG_PATH)).await?;
+        let config = MaterialConfig::from_json(&bytes).unwrap_or_default();
+        let mut prefixes: HashSet<String> = HashSet::new();
+        for &id in &config.texture_sets {
+            if set_uses.iter().any(|u| u.asset_id == id) {
+                continue;
+            }
+            let source = load_texture_set(ctx, &version, id, work.path(), &mut prefixes)
+                .await
+                .with_context(|| format!("texture set {id}"))?;
+            match source {
+                Ok(s) => {
+                    set_uses.push(s.info.clone());
+                    set_sources.push(s);
+                }
+                Err(unusable) => set_uses.push(unusable),
+            }
+        }
+    }
+
     let root = work.path().to_path_buf();
     let cfg = ctx.pipeline.clone();
     let mut output = tokio::task::spawn_blocking(move || {
-        let input = ProcessInput { root: &root, files: &relevant, skeletons: &sources };
+        let input = ProcessInput { root: &root, files: &relevant, skeletons: &sources, texture_sets: &set_sources };
         hangar_pipeline::process(&input, &cfg)
     })
     .await??;
     let m = &mut output.manifest;
+    // Unusable sets are recorded too (in config order), so fixing them reprocesses this version.
+    for u in &set_uses {
+        if let Some(e) = &u.error {
+            m.warnings.push(format!("texture set {}: {e}", u.name));
+        }
+    }
+    m.texture_sets = set_uses;
     for entry in &mut m.skeletons {
         if let Some(b) = built_from.iter().find(|b| b.skeleton == entry.skeleton) {
             (entry.version_id, entry.version_number) = (b.version_id, b.version_number);
@@ -365,6 +401,111 @@ async fn download_all(ctx: &WorkerCtx, files: &[FileEntry], root: &std::path::Pa
             .map_err(|e| anyhow::anyhow!("download {}: {e}", f.path))?;
     }
     Ok(())
+}
+
+#[derive(Debug, FromQueryResult)]
+struct TextureSetHead {
+    name: String,
+    slug: String,
+    version_id: Option<Uuid>,
+    number: Option<i32>,
+    allowed: bool,
+}
+
+/// Materialises the images of texture set `id`'s head version under
+/// `root/@<slug>/`, or says why the set can't be used. The version's author
+/// must be able to read the set (same project, member of its project, or admin).
+async fn load_texture_set(
+    ctx: &WorkerCtx,
+    version: &asset_versions::Model,
+    id: Uuid,
+    root: &std::path::Path,
+    prefixes: &mut HashSet<String>,
+) -> anyhow::Result<Result<TextureSetSource, TextureSetUse>> {
+    let unusable =
+        |name: String, error: &str| TextureSetUse { asset_id: id, name, error: Some(error.into()), ..Default::default() };
+    let own = assets::Entity::find_by_id(version.asset_id).one(&ctx.db).await?.context("asset vanished")?;
+    if id == own.id {
+        return Ok(Err(unusable(own.name, "an asset can't be its own texture set")));
+    }
+    let head = TextureSetHead::find_by_statement(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        "SELECT a.name, a.slug, v.id AS version_id, v.number,
+                (a.project_id = $3
+                 OR EXISTS (SELECT 1 FROM users u WHERE u.id = $2 AND u.is_admin)
+                 OR EXISTS (SELECT 1 FROM project_members m WHERE m.project_id = a.project_id AND m.user_id = $2))
+                AS allowed
+         FROM assets a LEFT JOIN asset_versions v ON v.id = a.head_version_id
+         WHERE a.id = $1",
+        [id.into(), version.author_id.into(), own.project_id.into()],
+    ))
+    .one(&ctx.db)
+    .await?;
+    let head = match head {
+        Some(h) if h.allowed => h,
+        // Don't reveal the name of a set the author can't see.
+        _ => return Ok(Err(unusable(id.to_string(), "asset not found"))),
+    };
+    let (Some(version_id), Some(number)) = (head.version_id, head.number) else {
+        return Ok(Err(unusable(head.name, "the texture set has no version yet")));
+    };
+    let mut prefix = format!("@{}", head.slug);
+    let mut n = 2;
+    while !prefixes.insert(prefix.clone()) {
+        prefix = format!("@{}-{n}", head.slug);
+        n += 1;
+    }
+    let images: Vec<FileEntry> = version_files::Entity::find()
+        .filter(version_files::Column::VersionId.eq(version_id))
+        .all(&ctx.db)
+        .await?
+        .iter()
+        .map(|f| f.to_entry())
+        .filter(|f| paths::is_image(&f.path))
+        .map(|f| FileEntry { path: format!("{prefix}/{}", f.path), ..f })
+        .collect();
+    download_all(ctx, &images, root).await?;
+    let info = TextureSetUse {
+        asset_id: id,
+        name: head.name,
+        prefix,
+        version_id: Some(version_id),
+        version_number: Some(number),
+        error: None,
+    };
+    Ok(Ok(TextureSetSource { info, files: images }))
+}
+
+#[derive(FromQueryResult)]
+struct IdRow {
+    id: Uuid,
+}
+
+/// Re-queues the head versions whose manifest lists texture set `set_asset`, so
+/// they pick up its new head version. Returns how many were queued.
+pub async fn requeue_texture_set_users<C: ConnectionTrait>(
+    conn: &C,
+    queue: &JobQueue,
+    set_asset: Uuid,
+) -> anyhow::Result<usize> {
+    let ids = IdRow::find_by_statement(Statement::from_sql_and_values(
+        DbBackend::Postgres,
+        "UPDATE asset_versions v SET status = 'pending', error = NULL
+         FROM assets a
+         WHERE a.head_version_id = v.id AND a.id <> $1
+           AND v.preview -> 'texture_sets' @> jsonb_build_array(jsonb_build_object('asset_id', $1::text))
+         RETURNING v.id",
+        [set_asset.into()],
+    ))
+    .all(conn)
+    .await?;
+    for row in &ids {
+        queue.enqueue(conn, KIND_PROCESS_VERSION, ProcessVersionPayload { version_id: row.id }).await?;
+    }
+    if !ids.is_empty() {
+        tracing::info!(set = %set_asset, versions = ids.len(), "texture set changed: users re-queued");
+    }
+    Ok(ids.len())
 }
 
 #[derive(Debug, FromQueryResult)]

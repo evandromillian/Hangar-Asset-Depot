@@ -39,6 +39,10 @@ pub struct PreviewManifest {
     /// `.hangar/animation.json`, in that order.
     #[serde(default)]
     pub skeletons: Vec<SkeletonPreview>,
+    /// Texture sets of `.hangar/materials.json` the model drew textures from, in
+    /// that order. Their images are listed in `textures` as `<prefix>/<path>`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub texture_sets: Vec<TextureSetUse>,
     pub stats: Option<ModelStats>,
     pub audio: Option<AudioInfo>,
     /// PNG thumbnail (software rendered for models, downscaled for images).
@@ -168,7 +172,42 @@ pub struct SkeletonPreview {
     pub error: Option<String>,
 }
 
+/// A texture set (an asset whose images several models share) linked by a
+/// model version.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct TextureSetUse {
+    pub asset_id: Uuid,
+    /// The set asset's name when the version was processed.
+    pub name: String,
+    /// `@<set slug>`: the set's images appear in the manifest as `<prefix>/<path>`.
+    pub prefix: String,
+    /// Version of the set the images came from (its head when processed).
+    pub version_id: Option<Uuid>,
+    pub version_number: Option<i32>,
+    /// Why the set could not be used (unknown asset, no access, no version).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Where a texture path of a manifest is stored: (version, path in it). Images
+/// of a texture set (`@slug/…`) live in the set's version.
+pub fn texture_location(sets: &[TextureSetUse], own_version: Uuid, path: &str) -> (Uuid, String) {
+    for s in sets {
+        if let Some(v) = s.version_id
+            && let Some(rest) = path.strip_prefix(s.prefix.as_str()).and_then(|r| r.strip_prefix('/'))
+        {
+            return (v, rest.to_string());
+        }
+    }
+    (own_version, path.to_string())
+}
+
 impl PreviewManifest {
+    /// [`texture_location`] with this manifest's texture sets.
+    pub fn file_location(&self, own_version: Uuid, path: &str) -> (Uuid, String) {
+        texture_location(&self.texture_sets, own_version, path)
+    }
+
     /// An animation version seen on one of its skeletons, shaped like a model
     /// manifest (a single LOD, the skeleton's clips) so the 3D viewer can show it.
     pub fn on_skeleton(&self, slug: &str) -> Option<PreviewManifest> {
@@ -230,4 +269,21 @@ pub struct AudioInfo {
     /// Normalised peak envelope (0..1), ~200 buckets — enough to draw a waveform.
     #[serde(default)]
     pub peaks: Vec<f32>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn texture_set_file_location() {
+        let (own, set_version) = (Uuid::from_u128(1), Uuid::from_u128(2));
+        let m = PreviewManifest {
+            texture_sets: vec![TextureSetUse { prefix: "@city".into(), version_id: Some(set_version), ..Default::default() }],
+            ..Default::default()
+        };
+        assert_eq!(m.file_location(own, "@city/walls/bh2b.jpg"), (set_version, "walls/bh2b.jpg".to_string()));
+        assert_eq!(m.file_location(own, "@cityscape/a.png"), (own, "@cityscape/a.png".to_string()));
+        assert_eq!(m.file_location(own, "Textures/a.png"), (own, "Textures/a.png".to_string()));
+    }
 }

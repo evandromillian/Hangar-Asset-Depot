@@ -8,5 +8,6 @@ pub mod members;
 pub mod new_version;
 pub mod stage;
 pub mod tags;
+pub mod texture_viewer;
 pub mod versions;
 pub mod viewer_panel;

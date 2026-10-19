@@ -42,44 +42,26 @@ pub fn run(input: &ProcessInput, cfg: &PipelineConfig) -> Result<ProcessOutput> 
     let images: Vec<String> = files.iter().filter(|f| paths::is_image(&f.path)).map(|f| f.path.clone()).collect();
     let models: Vec<String> = files.iter().filter(|f| paths::is_model(&f.path)).map(|f| f.path.clone()).collect();
     let audio: Vec<String> = files.iter().filter(|f| paths::is_audio(&f.path)).map(|f| f.path.clone()).collect();
-    let sizes: HashMap<&str, i64> = files.iter().map(|f| (f.path.as_str(), f.size)).collect();
+    // Images of the linked texture sets, already under their `@slug/` prefix.
+    let set_files: Vec<&hangar_core::FileEntry> =
+        input.texture_sets.iter().flat_map(|s| &s.files).filter(|f| paths::is_image(&f.path)).collect();
+    let set_images: Vec<String> = set_files.iter().map(|f| f.path.clone()).collect();
+    let sizes: HashMap<&str, i64> = files.iter().chain(&set_files).map(|f| (f.path.as_str(), f.size)).collect();
 
     let mut out = Out { artifacts: vec![], seen: HashSet::new() };
-    let mut manifest = PreviewManifest { pipeline_version: PIPELINE_VERSION, ..Default::default() };
+    let mut manifest = PreviewManifest {
+        pipeline_version: PIPELINE_VERSION,
+        texture_sets: input.texture_sets.iter().map(|s| s.info.clone()).collect(),
+        ..Default::default()
+    };
     let mut warnings: Vec<String> = Vec::new();
     let mut cache = ImageCache::new(cfg.max_texture_size);
     let manual = load_material_config(input.root, &files, &mut warnings);
 
     // ---- texture previews -------------------------------------------------
-    let mut preview_by_path: HashMap<String, String> = HashMap::new();
+    let mut previews = Previews { by_path: HashMap::new(), sizes: &sizes };
     for img in &images {
-        let ext = paths::extension(img);
-        let mut info = TextureInfo {
-            path: img.clone(),
-            width: 0,
-            height: 0,
-            format: ext.clone(),
-            size: sizes.get(img.as_str()).copied().unwrap_or(0).max(0) as u64,
-            slot: textures::detect_slot(img),
-            preview_hash: None,
-        };
-        if images::is_decodable_ext(&ext) {
-            match cache.get_file(input.root, img) {
-                Some(d) => {
-                    info.width = d.orig_width;
-                    info.height = d.orig_height;
-                    info.format = d.format.clone();
-                    let enc = cache.encode(&d, cfg.max_texture_size);
-                    let h = out.push(Artifact::new(ArtifactRole::TexturePreview(img.clone()), enc.1, enc.0.clone()));
-                    preview_by_path.insert(img.clone(), h.clone());
-                    info.preview_hash = Some(h);
-                }
-                None => warnings.push(format!("could not decode image {img}")),
-            }
-        } else {
-            warnings.push(format!("no web preview for .{ext} images ({img})"));
-        }
-        manifest.textures.push(info);
+        previews.add(input.root, img, cfg, &mut cache, &mut out, &mut manifest, &mut warnings);
     }
 
     if let Some(a) = audio.first() {
@@ -153,10 +135,15 @@ pub fn run(input: &ProcessInput, cfg: &PipelineConfig) -> Result<ProcessOutput> 
             ));
         }
         let anim_files: Vec<(String, PathBuf)> = anim_files.into_iter().map(|a| (a.clone(), input.root.join(a))).collect();
+        // Texture-set images are listed (and assignable by hand) only next to a model.
+        for img in &set_images {
+            previews.add(input.root, img, cfg, &mut cache, &mut out, &mut manifest, &mut warnings);
+        }
         let ctx = ModelInputs {
             sel: &sel,
             images: &images,
-            preview_by_path: &preview_by_path,
+            set_images: &set_images,
+            preview_by_path: &previews.by_path,
             manual: manual.as_ref(),
             anim_files: &anim_files,
         };
@@ -176,7 +163,7 @@ pub fn run(input: &ProcessInput, cfg: &PipelineConfig) -> Result<ProcessOutput> 
     }
 
     if !model_done {
-        if let Some(primary) = pick_primary_image(&images, &preview_by_path) {
+        if let Some(primary) = pick_primary_image(&images, &previews.by_path) {
             manifest.kind = Some(PreviewKind::Image);
             manifest.primary_file = Some(primary.clone());
             if let Some(d) = cache.get_file(input.root, &primary) {
@@ -194,6 +181,55 @@ pub fn run(input: &ProcessInput, cfg: &PipelineConfig) -> Result<ProcessOutput> 
 
     manifest.warnings = warnings;
     Ok(ProcessOutput { manifest, artifacts: out.artifacts })
+}
+
+/// Web previews of the images, by version path.
+struct Previews<'a> {
+    by_path: HashMap<String, String>,
+    sizes: &'a HashMap<&'a str, i64>,
+}
+
+impl Previews<'_> {
+    /// Lists `img` in the manifest with its web preview (when it can be decoded).
+    #[allow(clippy::too_many_arguments)]
+    fn add(
+        &mut self,
+        root: &Path,
+        img: &str,
+        cfg: &PipelineConfig,
+        cache: &mut ImageCache,
+        out: &mut Out,
+        manifest: &mut PreviewManifest,
+        warnings: &mut Vec<String>,
+    ) {
+        let ext = paths::extension(img);
+        let mut info = TextureInfo {
+            path: img.to_string(),
+            width: 0,
+            height: 0,
+            format: ext.clone(),
+            size: self.sizes.get(img).copied().unwrap_or(0).max(0) as u64,
+            slot: textures::detect_slot(img),
+            preview_hash: None,
+        };
+        if images::is_decodable_ext(&ext) {
+            match cache.get_file(root, img) {
+                Some(d) => {
+                    info.width = d.orig_width;
+                    info.height = d.orig_height;
+                    info.format = d.format.clone();
+                    let enc = cache.encode(&d, cfg.max_texture_size);
+                    let h = out.push(Artifact::new(ArtifactRole::TexturePreview(img.to_string()), enc.1, enc.0.clone()));
+                    self.by_path.insert(img.to_string(), h.clone());
+                    info.preview_hash = Some(h);
+                }
+                None => warnings.push(format!("could not decode image {img}")),
+            }
+        } else {
+            warnings.push(format!("no web preview for .{ext} images ({img})"));
+        }
+        manifest.textures.push(info);
+    }
 }
 
 /// Which model file to preview, plus authored LOD files.
@@ -303,6 +339,8 @@ fn load_material_config(
 struct ModelInputs<'a> {
     sel: &'a ModelSelection,
     images: &'a [String],
+    /// Images of the linked texture sets (`@slug/…`), searched after `images`.
+    set_images: &'a [String],
     preview_by_path: &'a HashMap<String, String>,
     manual: Option<&'a MaterialConfig>,
     /// Other FBX files (version path, file) whose takes animate the primary model.
@@ -318,7 +356,7 @@ fn build_model(
     manifest: &mut PreviewManifest,
     warnings: &mut Vec<String>,
 ) -> Result<()> {
-    let ModelInputs { sel, images, preview_by_path, manual, anim_files } = *ctx;
+    let ModelInputs { sel, images, set_images, preview_by_path, manual, anim_files } = *ctx;
     let scene: Scene = import::import(input.root, &sel.primary, cfg, anim_files)?;
     warnings.extend(scene.warnings.iter().cloned());
     let mut materials = scene.materials.clone();
@@ -364,7 +402,7 @@ fn build_model(
     if let Some(cfg) = manual {
         apply_cutoffs(cfg, &mut materials, warnings);
     }
-    let index = ImageIndex::new(images.to_vec());
+    let index = ImageIndex::new(images.to_vec()).with_fallback(set_images.to_vec());
     let resolved = textures::resolve_materials(&materials, &index, manual, warnings);
     let used: Vec<UsedTexture> = materials
         .iter()

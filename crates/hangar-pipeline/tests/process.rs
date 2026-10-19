@@ -133,7 +133,7 @@ fn processes_tank_end_to_end() {
     let dir = tempfile::tempdir().unwrap();
     let files = make_tank(dir.path());
     let cfg = PipelineConfig { thumbnail_size: 256, ..Default::default() };
-    let res = process(&ProcessInput { root: dir.path(), files: &files, skeletons: &[] }, &cfg).expect("pipeline");
+    let res = process(&ProcessInput { root: dir.path(), files: &files, skeletons: &[], texture_sets: &[] }, &cfg).expect("pipeline");
     let m = &res.manifest;
 
     assert_eq!(m.kind, Some(PreviewKind::Model));
@@ -229,7 +229,7 @@ fn manual_material_config() {
     .unwrap();
     let files = entries(dir.path());
     assert!(files.iter().any(|f| f.path == MATERIAL_CONFIG_PATH && hangar_pipeline::is_relevant(&f.path)));
-    let res = process(&ProcessInput { root: dir.path(), files: &files, skeletons: &[] }, &PipelineConfig::default()).unwrap();
+    let res = process(&ProcessInput { root: dir.path(), files: &files, skeletons: &[], texture_sets: &[] }, &PipelineConfig::default()).unwrap();
     let m = &res.manifest;
     assert!(m.warnings.is_empty(), "warnings: {:?}", m.warnings);
 
@@ -270,7 +270,7 @@ fn specular_maps() {
     )
     .unwrap();
     let files = entries(dir.path());
-    let res = process(&ProcessInput { root: dir.path(), files: &files, skeletons: &[] }, &PipelineConfig::default()).unwrap();
+    let res = process(&ProcessInput { root: dir.path(), files: &files, skeletons: &[], texture_sets: &[] }, &PipelineConfig::default()).unwrap();
     let m = &res.manifest;
     assert!(m.warnings.is_empty(), "warnings: {:?}", m.warnings);
     let spec = |name: &str| {
@@ -301,7 +301,7 @@ fn image_only_version() {
         .iter()
         .map(|p| FileEntry { path: p.to_string(), hash: String::new(), size: 10 })
         .collect();
-    let res = process(&ProcessInput { root: dir.path(), files: &files, skeletons: &[] }, &PipelineConfig::default()).unwrap();
+    let res = process(&ProcessInput { root: dir.path(), files: &files, skeletons: &[], texture_sets: &[] }, &PipelineConfig::default()).unwrap();
     assert_eq!(res.manifest.kind, Some(PreviewKind::Image));
     assert_eq!(res.manifest.primary_file.as_deref(), Some("T_Rock_D.png"));
     assert!(res.manifest.thumbnail_hash.is_some());
@@ -317,13 +317,13 @@ fn missing_importer_degrades_to_images() {
         FileEntry { path: "tank.blend".into(), hash: String::new(), size: 12 },
         FileEntry { path: "T_Tank_D.png".into(), hash: String::new(), size: 10 },
     ];
-    let res = process(&ProcessInput { root: dir.path(), files: &files, skeletons: &[] }, &PipelineConfig::default()).unwrap();
+    let res = process(&ProcessInput { root: dir.path(), files: &files, skeletons: &[], texture_sets: &[] }, &PipelineConfig::default()).unwrap();
     assert_eq!(res.manifest.kind, Some(PreviewKind::Image));
     assert!(res.manifest.warnings[0].contains("3D preview unavailable"));
 
     // A lone unsupported model is an error.
     let files = vec![FileEntry { path: "tank.blend".into(), hash: String::new(), size: 12 }];
-    assert!(process(&ProcessInput { root: dir.path(), files: &files, skeletons: &[] }, &PipelineConfig::default()).is_err());
+    assert!(process(&ProcessInput { root: dir.path(), files: &files, skeletons: &[], texture_sets: &[] }, &PipelineConfig::default()).is_err());
 }
 
 /// Runs on a real FBX: `HANGAR_SAMPLE_FBX=/path/model.fbx cargo test -p hangar-pipeline -- --ignored`.
@@ -345,7 +345,7 @@ fn sample_fbx_from_env() {
         })
         .filter(|f| hangar_pipeline::is_relevant(&f.path))
         .collect();
-    let res = process(&ProcessInput { root: dir, files: &files, skeletons: &[] }, &PipelineConfig::default()).unwrap();
+    let res = process(&ProcessInput { root: dir, files: &files, skeletons: &[], texture_sets: &[] }, &PipelineConfig::default()).unwrap();
     let m = &res.manifest;
     println!("{}", serde_json::to_string_pretty(m).unwrap());
     assert_eq!(m.kind, Some(PreviewKind::Model));
@@ -375,7 +375,7 @@ fn authored_lod_files() {
     }
     std::fs::write(dir.path().join("tank.mtl"), "newmtl M_Tank_Body\nKd 0.5 0.5 0.4\n").unwrap();
     let files = entries(dir.path());
-    let res = process(&ProcessInput { root: dir.path(), files: &files, skeletons: &[] }, &PipelineConfig::default()).unwrap();
+    let res = process(&ProcessInput { root: dir.path(), files: &files, skeletons: &[], texture_sets: &[] }, &PipelineConfig::default()).unwrap();
     let m = &res.manifest;
     assert_eq!(m.primary_file.as_deref(), Some("Tank_LOD0.obj"));
     assert_eq!(m.lods.len(), 2, "{:?}", m.lods);
@@ -395,7 +395,7 @@ fn authored_lod_meshes_by_name() {
     std::fs::write(dir.path().join("tank.obj"), &obj.out).unwrap();
     std::fs::write(dir.path().join("tank.mtl"), "newmtl M_Tank_Body\nKd 0.5 0.5 0.4\n").unwrap();
     let files = entries(dir.path());
-    let res = process(&ProcessInput { root: dir.path(), files: &files, skeletons: &[] }, &PipelineConfig::default()).unwrap();
+    let res = process(&ProcessInput { root: dir.path(), files: &files, skeletons: &[], texture_sets: &[] }, &PipelineConfig::default()).unwrap();
     let m = &res.manifest;
     assert_eq!(m.lods.len(), 2);
     // the un-suffixed antenna (12 tris) is part of every level
@@ -444,7 +444,7 @@ fn gltf_with_specular_glossiness_material() {
         .iter()
         .map(|p| FileEntry { path: p.to_string(), hash: String::new(), size: 1 })
         .collect();
-    let res = process(&ProcessInput { root: dir.path(), files: &files, skeletons: &[] }, &PipelineConfig::default()).unwrap();
+    let res = process(&ProcessInput { root: dir.path(), files: &files, skeletons: &[], texture_sets: &[] }, &PipelineConfig::default()).unwrap();
     let m = &res.manifest;
     assert_eq!(m.kind, Some(hangar_core::PreviewKind::Model), "warnings: {:?}", m.warnings);
     assert_eq!(m.model_error, None);
@@ -566,7 +566,7 @@ fn fbx_alpha_follows_the_material_wiring() {
     );
     std::fs::write(dir.path().join("props.fbx"), fbx).unwrap();
     let files = listed(dir.path(), &["props.fbx", "masked.png", "leaf.png", "leaf_opacity.png"]);
-    let res = process(&ProcessInput { root: dir.path(), files: &files, skeletons: &[] }, &PipelineConfig::default()).unwrap();
+    let res = process(&ProcessInput { root: dir.path(), files: &files, skeletons: &[], texture_sets: &[] }, &PipelineConfig::default()).unwrap();
     assert_eq!(res.manifest.model_error, None, "warnings: {:?}", res.manifest.warnings);
     let a = glb_alpha(&res);
 
@@ -617,7 +617,7 @@ fn gltf_alpha_mode_is_kept() {
     );
     std::fs::write(dir.path().join("Crate.gltf"), gltf).unwrap();
     let files = listed(dir.path(), &["Crate.gltf", "Crate.bin", "crate.png"]);
-    let res = process(&ProcessInput { root: dir.path(), files: &files, skeletons: &[] }, &PipelineConfig::default()).unwrap();
+    let res = process(&ProcessInput { root: dir.path(), files: &files, skeletons: &[], texture_sets: &[] }, &PipelineConfig::default()).unwrap();
     let a = glb_alpha(&res);
     assert_eq!((a["M_Opaque"].0.as_str(), a["M_Opaque"].2), ("OPAQUE", 1.0), "{:?}", a["M_Opaque"]);
     assert_eq!((a["M_Cutout"].0.as_str(), a["M_Cutout"].1), ("MASK", 0.3), "{:?}", a["M_Cutout"]);
@@ -632,7 +632,7 @@ fn obj_base_color_alpha_is_a_cutout() {
     std::fs::write(dir.path().join("leaf.mtl"), "newmtl M_Leaf\nKd 1 1 1\nmap_Kd leaf.png\n").unwrap();
     write_alpha_png(&dir.path().join("leaf.png"), 40);
     let files = listed(dir.path(), &["leaf.obj", "leaf.mtl", "leaf.png"]);
-    let res = process(&ProcessInput { root: dir.path(), files: &files, skeletons: &[] }, &PipelineConfig::default()).unwrap();
+    let res = process(&ProcessInput { root: dir.path(), files: &files, skeletons: &[], texture_sets: &[] }, &PipelineConfig::default()).unwrap();
     assert_eq!(glb_alpha(&res)["M_Leaf"].0, "MASK");
 }
 
@@ -651,7 +651,7 @@ fn manual_opacity_map_uses_its_alpha_channel() {
     std::fs::write(dir.path().join(MATERIAL_CONFIG_PATH), r#"{ "materials": { "M_Net": { "opacity": "net.png" } } }"#)
         .unwrap();
     let files = listed(dir.path(), &["net.obj", "net.mtl", "net.png", MATERIAL_CONFIG_PATH]);
-    let res = process(&ProcessInput { root: dir.path(), files: &files, skeletons: &[] }, &PipelineConfig::default()).unwrap();
+    let res = process(&ProcessInput { root: dir.path(), files: &files, skeletons: &[], texture_sets: &[] }, &PipelineConfig::default()).unwrap();
     assert!(res.manifest.warnings.is_empty(), "warnings: {:?}", res.manifest.warnings);
     let net = &glb_alpha(&res)["M_Net"];
     assert_eq!(net.0, "MASK", "{net:?}");
@@ -676,7 +676,7 @@ fn manual_alpha_cutoff() {
         let mut paths = vec!["net.obj", "net.mtl", "net.png"];
         paths.extend(config.map(|_| MATERIAL_CONFIG_PATH));
         let files = listed(dir.path(), &paths);
-        process(&ProcessInput { root: dir.path(), files: &files, skeletons: &[] }, &PipelineConfig::default()).unwrap()
+        process(&ProcessInput { root: dir.path(), files: &files, skeletons: &[], texture_sets: &[] }, &PipelineConfig::default()).unwrap()
     };
     let covered = |res: &hangar_pipeline::ProcessOutput| {
         let thumb = res.artifacts.iter().find(|a| a.role == ArtifactRole::Thumbnail).unwrap();
@@ -697,4 +697,65 @@ fn manual_alpha_cutoff() {
     assert_eq!((net.0.as_str(), net.1), ("MASK", 0.1), "{net:?}");
     assert!(covered(&manual) > 100, "the triangle shows at cutoff 0.1");
     assert!(manual.manifest.warnings.iter().any(|w| w.contains("M_Missing")), "{:?}", manual.manifest.warnings);
+}
+
+/// A linked texture set (shared by many models) is searched after the version's
+/// own images: references found only there resolve by file name (with their
+/// sibling maps), the version's own file wins a name clash, a set image can be
+/// assigned by hand as `@slug/path`, and the manifest records the set.
+#[test]
+fn texture_set_images_back_the_model() {
+    use hangar_core::TextureSetUse;
+    use hangar_pipeline::TextureSetSource;
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut obj = String::from("mtllib house.mtl\nv 0 0 0\nv 1 0 0\nv 0 1 0\nvt 0 0\nvt 1 0\nvt 0 1\n");
+    for m in ["M_Wall", "M_Roof", "M_Glass"] {
+        writeln!(obj, "usemtl {m}\nf 1/1 2/2 3/3").unwrap();
+    }
+    std::fs::write(dir.path().join("house.obj"), obj).unwrap();
+    std::fs::write(
+        dir.path().join("house.mtl"),
+        "newmtl M_Wall\nmap_Kd C:/city/walls_BaseColor.png\nnewmtl M_Roof\nmap_Kd roof.png\nnewmtl M_Glass\nKd 0.5 0.6 0.7\n",
+    )
+    .unwrap();
+    write_png(&dir.path().join("roof.png"), [200, 40, 40]);
+    std::fs::create_dir_all(dir.path().join(".hangar")).unwrap();
+    std::fs::write(dir.path().join(MATERIAL_CONFIG_PATH), r#"{ "materials": { "M_Glass": { "base_color": "@city/tex/glass.png" } } }"#)
+        .unwrap();
+    std::fs::create_dir_all(dir.path().join("@city/tex")).unwrap();
+    let set_paths = ["@city/tex/walls_BaseColor.png", "@city/tex/walls_Normal.png", "@city/tex/roof.png", "@city/tex/glass.png"];
+    for p in set_paths {
+        write_png(&dir.path().join(p), [90, 90, 120]);
+    }
+    let info = TextureSetUse { name: "City set".into(), prefix: "@city".into(), version_number: Some(3), ..Default::default() };
+    let sets = [TextureSetSource { info: info.clone(), files: listed(dir.path(), &set_paths) }];
+    let files = listed(dir.path(), &["house.obj", "house.mtl", "roof.png", MATERIAL_CONFIG_PATH]);
+    let res = process(&ProcessInput { root: dir.path(), files: &files, skeletons: &[], texture_sets: &sets }, &PipelineConfig::default())
+        .unwrap();
+    let m = &res.manifest;
+    assert_eq!(m.texture_sets, vec![info]);
+    let tex = |mat: &str, slot: TextureSlot| {
+        let t = m.materials.iter().find(|x| x.name == mat).unwrap().textures.iter().find(|t| t.slot == slot).cloned();
+        t.map(|t| (t.path.unwrap_or_default(), t.resolved_by))
+    };
+    assert_eq!(tex("M_Wall", TextureSlot::BaseColor), Some(("@city/tex/walls_BaseColor.png".into(), "texture-set".into())));
+    assert_eq!(tex("M_Wall", TextureSlot::Normal), Some(("@city/tex/walls_Normal.png".into(), "sibling".into())));
+    assert_eq!(tex("M_Roof", TextureSlot::BaseColor), Some(("roof.png".into(), "exact".into())), "own file wins");
+    assert_eq!(tex("M_Glass", TextureSlot::BaseColor), Some(("@city/tex/glass.png".into(), "manual".into())));
+    for p in set_paths {
+        let t = m.textures.iter().find(|t| t.path == p).unwrap_or_else(|| panic!("{p} listed"));
+        assert!(t.preview_hash.is_some(), "{p} previewed");
+    }
+    assert!(m.warnings.is_empty(), "warnings: {:?}", m.warnings);
+    let glb = res.artifacts.iter().find(|a| a.role == ArtifactRole::LodGlb(0)).unwrap();
+    let g = gltf::Gltf::from_slice(&glb.bytes).unwrap();
+    let wall = g.materials().find(|x| x.name() == Some("M_Wall")).unwrap();
+    assert!(wall.pbr_metallic_roughness().base_color_texture().is_some() && wall.normal_texture().is_some());
+
+    // Without a model the set's images are not part of the version.
+    let files = listed(dir.path(), &["roof.png"]);
+    let res = process(&ProcessInput { root: dir.path(), files: &files, skeletons: &[], texture_sets: &sets }, &PipelineConfig::default())
+        .unwrap();
+    assert_eq!(res.manifest.textures.iter().map(|t| t.path.as_str()).collect::<Vec<_>>(), ["roof.png"]);
 }

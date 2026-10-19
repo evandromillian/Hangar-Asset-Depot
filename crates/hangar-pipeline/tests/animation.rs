@@ -178,7 +178,7 @@ fn animated_fbx_exports_rig_and_clip() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("anim.fbx"), animated_fbx()).unwrap();
     let files = vec![FileEntry { path: "anim.fbx".into(), hash: String::new(), size: 1 }];
-    let res = process(&ProcessInput { root: dir.path(), files: &files, skeletons: &[] }, &PipelineConfig::default()).expect("pipeline");
+    let res = process(&ProcessInput { root: dir.path(), files: &files, skeletons: &[], texture_sets: &[] }, &PipelineConfig::default()).expect("pipeline");
     let m = &res.manifest;
     assert!(m.warnings.is_empty(), "warnings: {:?}", m.warnings);
 
@@ -276,7 +276,7 @@ fn separate_animation_files_animate_the_model() {
         .iter()
         .map(|p| FileEntry { path: p.to_string(), hash: String::new(), size: 1 })
         .collect();
-    let res = process(&ProcessInput { root: dir.path(), files: &files, skeletons: &[] }, &PipelineConfig::default()).expect("pipeline");
+    let res = process(&ProcessInput { root: dir.path(), files: &files, skeletons: &[], texture_sets: &[] }, &PipelineConfig::default()).expect("pipeline");
     let m = &res.manifest;
     assert!(m.warnings.is_empty(), "warnings: {:?}", m.warnings);
     assert_eq!(m.primary_file.as_deref(), Some("Shark.fbx"));
@@ -316,7 +316,7 @@ fn animation_only_version_lists_its_clips() {
     let dir = tempfile::tempdir().unwrap();
     let clip = fbx(Parts { geometry: false, animated: true, bone_prefix: "", take: "Run" });
     let files = write_files(dir.path(), &[("Run.fbx", clip)]);
-    let res = process(&ProcessInput { root: dir.path(), files: &files, skeletons: &[] }, &PipelineConfig::default()).expect("pipeline");
+    let res = process(&ProcessInput { root: dir.path(), files: &files, skeletons: &[], texture_sets: &[] }, &PipelineConfig::default()).expect("pipeline");
     let m = &res.manifest;
     assert_eq!(m.kind, Some(hangar_core::PreviewKind::Animation));
     assert_eq!(m.primary_file.as_deref(), Some("Run.fbx"));
@@ -349,7 +349,7 @@ fn animations_play_on_reference_skeletons() {
     let clip = fbx(Parts { geometry: false, animated: true, bone_prefix: "rig:", take: "Take 001" });
     let config = r#"{"skeletons":["ue5-manny","alien"]}"#.to_string();
     let files = write_files(dir.path(), &[("anims/Manny@Bend.fbx", clip.clone()), (".hangar/animation.json", config)]);
-    let input = ProcessInput { root: dir.path(), files: &files, skeletons: &skeletons };
+    let input = ProcessInput { root: dir.path(), files: &files, skeletons: &skeletons, texture_sets: &[] };
     let res = process(&input, &PipelineConfig::default()).expect("pipeline");
     let m = &res.manifest;
     assert_eq!(m.kind, Some(hangar_core::PreviewKind::Animation));
@@ -385,7 +385,7 @@ fn animations_play_on_reference_skeletons() {
     // A version with its own mesh keeps its animations on it.
     let model = fbx(Parts { geometry: true, animated: false, bone_prefix: "", take: "" });
     let files = write_files(dir.path(), &[("Manny.fbx", model), ("anims/Manny@Bend.fbx", clip)]);
-    let res = process(&ProcessInput { root: dir.path(), files: &files, skeletons: &skeletons }, &PipelineConfig::default()).unwrap();
+    let res = process(&ProcessInput { root: dir.path(), files: &files, skeletons: &skeletons, texture_sets: &[] }, &PipelineConfig::default()).unwrap();
     assert_eq!(res.manifest.kind, Some(hangar_core::PreviewKind::Model));
     assert!(res.manifest.skeletons.is_empty());
     assert_eq!(res.manifest.animations.len(), 1);
@@ -415,7 +415,7 @@ fn animation_package_with_a_prop_plays_on_the_skeleton() {
             (".hangar/animation.json", r#"{"skeletons":["ue5-manny"]}"#.into()),
         ],
     );
-    let res = process(&ProcessInput { root: dir.path(), files: &files, skeletons: &skeletons }, &PipelineConfig::default()).unwrap();
+    let res = process(&ProcessInput { root: dir.path(), files: &files, skeletons: &skeletons, texture_sets: &[] }, &PipelineConfig::default()).unwrap();
     let m = &res.manifest;
     assert_eq!(m.kind, Some(hangar_core::PreviewKind::Animation), "{:?}", m.warnings);
     assert_eq!(m.animations.iter().map(|a| a.name.as_str()).collect::<Vec<_>>(), ["A_Fire", "A_Reload"]);
@@ -539,7 +539,7 @@ fn gltf_animations_are_exported() {
     std::fs::write(dir.path().join("Rig.gltf"), gltf).unwrap();
     let files: Vec<FileEntry> =
         ["Rig.gltf", "Rig.bin"].iter().map(|p| FileEntry { path: p.to_string(), hash: String::new(), size: 1 }).collect();
-    let res = process(&ProcessInput { root: dir.path(), files: &files, skeletons: &[] }, &PipelineConfig::default()).expect("pipeline");
+    let res = process(&ProcessInput { root: dir.path(), files: &files, skeletons: &[], texture_sets: &[] }, &PipelineConfig::default()).expect("pipeline");
     let m = &res.manifest;
     assert!(m.warnings.is_empty(), "warnings: {:?}", m.warnings);
     assert_eq!(m.animations.iter().map(|a| a.name.as_str()).collect::<Vec<_>>(), ["Bend", "Hop"]);

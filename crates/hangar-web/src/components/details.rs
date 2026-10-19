@@ -1,11 +1,14 @@
 //! Asset metadata + processing details of the selected version.
 
+use crate::components::texture_viewer::TextureViewer;
 use crate::util::{fmt_bytes, fmt_datetime, fmt_int};
 use hangar_core::{AssetDetail, VersionDto, blob_url};
 use leptos::prelude::*;
 
 #[component]
 pub fn DetailsPanel(asset: Signal<Option<AssetDetail>>, version: Signal<Option<VersionDto>>) -> impl IntoView {
+    // Fullscreen viewer, opened on a texture of the grid.
+    let zoomed = RwSignal::new(None::<usize>);
     view! {
         <div class="details">
             {move || {
@@ -123,14 +126,31 @@ pub fn DetailsPanel(asset: Signal<Option<AssetDetail>>, version: Signal<Option<V
                                     </ul>
                                 </section>
                             })}
+                            {(!p.texture_sets.is_empty()).then(|| view! {
+                                <section class="detail-block">
+                                    <h3>"Conjuntos de texturas"</h3>
+                                    <ul class="set-list">
+                                        {p.texture_sets.iter().map(|s| view! {
+                                            <li class:failed=s.error.is_some()>
+                                                <a href=format!("/a/{}", s.asset_id)>{s.name.clone()}</a>
+                                                <span class="muted mono">
+                                                    {s.version_number.map(|n| format!("v{n}")).unwrap_or_default()} " "
+                                                    {s.prefix.clone()}
+                                                </span>
+                                                {s.error.clone().map(|e| view! { <span class="set-error">{e}</span> })}
+                                            </li>
+                                        }).collect_view()}
+                                    </ul>
+                                </section>
+                            })}
                             {(!p.textures.is_empty()).then(|| view! {
                                 <section class="detail-block">
                                     <h3>{format!("Texturas ({})", p.textures.len())}</h3>
                                     <div class="tex-grid">
-                                        {p.textures.iter().map(|t| {
+                                        {p.textures.iter().enumerate().map(|(i, t)| {
                                             let src = t.preview_hash.as_deref().map(blob_url).unwrap_or_default();
                                             view! {
-                                                <figure class="tex">
+                                                <figure class="tex" title="Clique para ampliar" on:click=move |_| zoomed.set(Some(i))>
                                                     <div class="checker"><img src=src alt="" loading="lazy" /></div>
                                                     <figcaption>
                                                         <span class="mono clamp-1" title=t.path.clone()>{hangar_core::paths::file_name(&t.path).to_string()}</span>
@@ -146,6 +166,20 @@ pub fn DetailsPanel(asset: Signal<Option<AssetDetail>>, version: Signal<Option<V
                             })}
                         }
                     })
+            }}
+            {move || {
+                let start = zoomed.get()?;
+                let v = version.get_untracked()?;
+                let (textures, sets) = v.preview.map(|p| (p.textures, p.texture_sets)).unwrap_or_default();
+                Some(view! {
+                    <TextureViewer
+                        textures=textures
+                        start=start
+                        version_id=v.id
+                        texture_sets=sets
+                        on_close=Callback::new(move |_| zoomed.set(None))
+                    />
+                })
             }}
         </div>
     }

@@ -2,6 +2,7 @@
 //! player, or the processing status of the selected version.
 
 use crate::api;
+use crate::components::texture_viewer::TextureViewer;
 use crate::components::viewer_panel::ViewerPanel;
 use crate::util::fmt_bytes;
 use crate::viewer::ViewerDraft;
@@ -165,9 +166,15 @@ pub fn Stage(
 fn TextureGallery(version: Signal<Option<VersionDto>>) -> impl IntoView {
     let selected = RwSignal::new(0usize);
     let textures = Memo::new(move |_| version.get().and_then(|v| v.preview).map(|p| p.textures).unwrap_or_default());
+    // Fullscreen viewer, opened on the selected texture.
+    let zoomed = RwSignal::new(None::<usize>);
     view! {
         <div class="gallery">
-            <div class="gallery-main checker">
+            <div
+                class="gallery-main checker"
+                title="Clique para ampliar"
+                on:click=move |_| zoomed.set(Some(selected.get_untracked().min(textures.with_untracked(|t| t.len().saturating_sub(1)))))
+            >
                 {move || {
                     let list = textures.get();
                     let t = list.get(selected.get()).or(list.first()).cloned();
@@ -206,6 +213,18 @@ fn TextureGallery(version: Signal<Option<VersionDto>>) -> impl IntoView {
                         .collect_view()
                 }}
             </div>
+            {move || {
+                let start = zoomed.get()?;
+                let vid = version.with_untracked(|v| v.as_ref().map(|v| v.id))?;
+                Some(view! {
+                    <TextureViewer
+                        textures=textures.get_untracked()
+                        start=start
+                        version_id=vid
+                        on_close=Callback::new(move |_| zoomed.set(None))
+                    />
+                })
+            }}
         </div>
     }
 }

@@ -4,11 +4,12 @@
 //! cargo run -p hangar-pipeline --example process_dir -- <asset-dir> <out-dir> [<skeleton-dir>...]
 //! ```
 //! Extra directories are reference skeletons (slug = directory name) for an
-//! animation-only asset. Set `HANGAR_BLENDER=/path/to/blender` to enable the
-//! Blender fallback.
+//! animation-only asset. Top-level `@<name>/` folders of `<asset-dir>` act as
+//! linked texture sets (as the worker lays them out). Set
+//! `HANGAR_BLENDER=/path/to/blender` to enable the Blender fallback.
 
-use hangar_core::FileEntry;
-use hangar_pipeline::{process, ArtifactRole, PipelineConfig, ProcessInput, SkeletonSource};
+use hangar_core::{FileEntry, TextureSetUse};
+use hangar_pipeline::{process, ArtifactRole, PipelineConfig, ProcessInput, SkeletonSource, TextureSetSource};
 use std::path::{Path, PathBuf};
 
 fn scan(dir: &Path) -> anyhow::Result<Vec<FileEntry>> {
@@ -27,7 +28,18 @@ fn main() -> anyhow::Result<()> {
     let out = PathBuf::from(args.next().expect("usage: process_dir <dir> <out> [<skeleton-dir>...]"));
     std::fs::create_dir_all(&out)?;
 
-    let files = scan(&dir)?;
+    let (set_files, files): (Vec<FileEntry>, Vec<FileEntry>) = scan(&dir)?.into_iter().partition(|f| f.path.starts_with('@'));
+    let mut texture_sets: Vec<TextureSetSource> = Vec::new();
+    for f in set_files {
+        let prefix = f.path.split('/').next().unwrap_or_default().to_string();
+        match texture_sets.iter_mut().find(|s| s.info.prefix == prefix) {
+            Some(s) => s.files.push(f),
+            None => {
+                let info = TextureSetUse { name: prefix[1..].to_string(), prefix, ..Default::default() };
+                texture_sets.push(TextureSetSource { info, files: vec![f] });
+            }
+        }
+    }
     let mut skeletons = Vec::new();
     for s in args {
         let root = PathBuf::from(s);
@@ -41,7 +53,7 @@ fn main() -> anyhow::Result<()> {
         cfg.blender_script = Some(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tools/blender/export_glb.py"));
     }
     let t = std::time::Instant::now();
-    let res = process(&ProcessInput { root: &dir, files: &files, skeletons: &skeletons }, &cfg)?;
+    let res = process(&ProcessInput { root: &dir, files: &files, skeletons: &skeletons, texture_sets: &texture_sets }, &cfg)?;
     eprintln!("processed {} files in {:.2?}", files.len(), t.elapsed());
 
     std::fs::write(out.join("manifest.json"), serde_json::to_vec_pretty(&res.manifest)?)?;

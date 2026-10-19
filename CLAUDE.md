@@ -54,9 +54,10 @@ cargo run -p hangar-pipeline --example process_dir -- <asset-dir> <out-dir>
 cargo run -p hangar-cli -- login --server http://localhost:8100 --user <name>
 cargo run -p hangar-cli -- push <asset-id> ./folder -m "message" --mirror --wait
 cargo run -p hangar-cli -- clone-asset <asset-id> --name "New"   # kind/description/tags/source, no versions
+cargo run -p hangar-cli -- push <asset-id> ./folder -m "msg" --texture-set <set-asset-id>   # links a shared texture set
 
 # Batch import: each subfolder of -Root → one asset cloned from -Template, v1 = folder; resumable
-.\tools\import-folders.ps1 -Root <package-dir> -Template <asset-id> -AssetPrefix "Name "
+.\tools\import-folders.ps1 -Root <package-dir> -Template <asset-id> -AssetPrefix "Name "   # -TextureSet <id>; -Files "*.fbx" = one asset per file
 ```
 
 ## Configuration (summer-rs)
@@ -150,6 +151,16 @@ prepared statements. Add `?sslmode=require`.
   `Mask(cutoff)` — model files can't carry a shader's threshold. The manifest's
   `MaterialInfo::alpha_mode` / `alpha_cutoff` record what was baked; the viewer previews
   unsaved cutoffs as Bevy `AlphaMode::Mask`.
+- Texture sets: `MaterialConfig::texture_sets` (asset ids) link assets of shared images. The
+  worker materialises each set's **head** images under `@<slug>/` in the work dir
+  (`ProcessInput::texture_sets`; the version's author must be able to read the set, else the
+  entry gets an `error` and no name). `ImageIndex::with_fallback`: the set's images are
+  searched after the version's own, by path / file name only (`resolved_by: "texture-set"`,
+  siblings included) — material-name heuristics stay on own files. Set images are listed in
+  `manifest.textures` (with previews) only when a model is built; `manifest.texture_sets`
+  records them in config order. A new head of an asset re-queues the head versions whose
+  manifest lists it (`jobs::requeue_texture_set_users`, on commit and on head change);
+  `hangar_core::texture_location` maps `@slug/…` paths to the set's version for downloads.
 - Recoverable problems go to `manifest.warnings`, not errors. Fail only when nothing can be previewed.
 - Heuristics (texture resolution, slot tokens, variant detection, LOD suffixes) are unit-tested in
   their modules; extend those tests when changing them.

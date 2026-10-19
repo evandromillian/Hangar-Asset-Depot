@@ -109,6 +109,9 @@ pub struct ImageIndex {
     pub images: Vec<String>,
     by_lower_path: HashMap<String, String>,
     by_lower_name: BTreeMap<String, Vec<String>>,
+    /// Images of linked texture sets (`@slug/…`): searched after the version's
+    /// own, by path / file name only — the name heuristics stay on own files.
+    fallback: Option<Box<ImageIndex>>,
 }
 
 impl ImageIndex {
@@ -120,7 +123,18 @@ impl ImageIndex {
             by_lower_path.insert(p.to_ascii_lowercase(), p.clone());
             by_lower_name.entry(paths::file_name(p).to_ascii_lowercase()).or_default().push(p.clone());
         }
-        Self { images, by_lower_path, by_lower_name }
+        Self { images, by_lower_path, by_lower_name, fallback: None }
+    }
+
+    /// Adds texture-set images behind the version's own.
+    pub fn with_fallback(mut self, images: Vec<String>) -> Self {
+        self.fallback = (!images.is_empty()).then(|| Box::new(ImageIndex::new(images)));
+        self
+    }
+
+    /// Own images, then texture-set images.
+    pub fn all_images(&self) -> impl Iterator<Item = &String> {
+        self.images.iter().chain(self.fallback.iter().flat_map(|f| f.images.iter()))
     }
 
     pub fn contains(&self, path: &str) -> bool {
@@ -130,7 +144,7 @@ impl ImageIndex {
     /// The version path of an image given by its version-relative path (case-insensitive).
     pub fn find(&self, path: &str) -> Option<String> {
         let n = paths::normalize(path)?;
-        self.by_lower_path.get(&n.to_ascii_lowercase()).cloned()
+        self.by_lower_path.get(&n.to_ascii_lowercase()).cloned().or_else(|| self.fallback.as_ref()?.find(&n))
     }
 
     /// Fallback for a reference whose file was renamed: the image with the same
@@ -153,8 +167,14 @@ impl ImageIndex {
     }
 
     /// Resolve a path written inside a model file. Returns the version path
-    /// and how it was found ("exact" / "filename").
+    /// and how it was found ("exact" / "filename", "texture-set" for an image
+    /// of a linked set, matched by file name).
     pub fn resolve(&self, original: &str, base_dir: &str) -> Option<(String, &'static str)> {
+        self.resolve_own(original, base_dir)
+            .or_else(|| self.fallback.as_ref()?.resolve_own(original, "").map(|(p, _)| (p, "texture-set")))
+    }
+
+    fn resolve_own(&self, original: &str, base_dir: &str) -> Option<(String, &'static str)> {
         let cleaned = clean_original(original);
         if cleaned.is_empty() {
             return None;
@@ -436,7 +456,7 @@ pub fn resolve_materials(
             if covered(&out[mi], &cleared[mi], slot) {
                 continue;
             }
-            let sibling = index.images.iter().find(|p| detect_slot(p) == Some(slot) && set_key(p).as_ref() == Some(&key));
+            let sibling = index.all_images().find(|p| detect_slot(p) == Some(slot) && set_key(p).as_ref() == Some(&key));
             if let Some(p) = sibling {
                 fill(&mut out[mi], slot, p.clone(), "sibling");
             }

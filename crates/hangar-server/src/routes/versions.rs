@@ -3,7 +3,7 @@ use crate::auth::CurrentUser;
 use crate::dto;
 use crate::entities::{asset_versions, assets, version_files};
 use crate::error::{Ctx, Result, bad_request, not_found};
-use crate::jobs::{JobQueue, KIND_PROCESS_VERSION, ProcessVersionPayload};
+use crate::jobs::{JobQueue, KIND_PROCESS_VERSION, ProcessVersionPayload, requeue_texture_set_users};
 use crate::storage::BlobStore;
 use hangar_core::{CommitVersionRequest, DiffQuery, FileEntry, VersionDiff, VersionDto, VersionStatus, paths};
 use sea_orm::{
@@ -166,6 +166,10 @@ async fn commit_version(
     ))
     .await
     .ctx("update asset")?;
+    if head != asset.head_version_id {
+        // Models using this asset as a texture set follow its head.
+        requeue_texture_set_users(&txn, &queue, asset.id).await.ctx_any("requeue texture set users")?;
+    }
 
     queue
         .enqueue(&txn, KIND_PROCESS_VERSION, ProcessVersionPayload { version_id })

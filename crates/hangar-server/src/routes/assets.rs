@@ -3,6 +3,7 @@ use crate::auth::CurrentUser;
 use crate::dto;
 use crate::entities::{asset_versions, assets};
 use crate::error::{Ctx, Result, bad_request, slugify};
+use crate::jobs::{JobQueue, requeue_texture_set_users};
 use hangar_core::{
     AssetDetail, AssetKind, AssetQuery, AssetSummary, CreateAssetRequest, Page, UpdateAssetRequest, VersionBrief,
     VersionDto,
@@ -198,10 +199,12 @@ async fn get_asset(
 async fn update_asset(
     user: CurrentUser,
     Component(db): Component<DatabaseConnection>,
+    Component(queue): Component<JobQueue>,
     Path(id): Path<Uuid>,
     Json(req): Json<UpdateAssetRequest>,
 ) -> Result<Json<AssetDetail>> {
     let (a, role) = access::asset(&db, &user, id, Need::Write).await?;
+    let head_changed = req.head_version_id.is_some_and(|h| a.head_version_id != Some(h));
     if let Some(head) = req.head_version_id {
         let v = asset_versions::Entity::find_by_id(head).one(&db).await.ctx("load version")?;
         if v.map(|v| v.asset_id) != Some(a.id) {
@@ -229,6 +232,11 @@ async fn update_asset(
     }
     m.updated_at = Set(chrono::Utc::now());
     let a = m.update(&db).await.ctx("update asset")?;
+    if head_changed {
+        // Models using this asset as a texture set follow its head.
+        requeue_texture_set_users(&db, &queue, a.id).await.map_err(|e| e.context("requeue texture set users"))?;
+        queue.wake();
+    }
     Ok(Json(dto::asset_detail(&db, a, Some(role)).await?))
 }
 

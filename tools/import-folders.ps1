@@ -11,9 +11,23 @@
     Progress is kept in <Root>\.hangar-import.tsv (one asset id per folder), so re-running
     resumes without creating duplicates; folders already pushed print "nada mudou".
 
+    -TextureSet links texture-set assets (ids, comma separated) to every version: models whose
+    textures are not in their folder find them in the set by file name.
+
+    -Files <wildcard> imports files instead of folders: each matching file directly in -Root
+    becomes one asset (named after the file, without extension) whose v1 is that file alone.
+
 .EXAMPLE
     .\tools\import-folders.ps1 -Root "C:\Dev\Assets\Weapons\Sci-Fi Swords" `
         -Template <asset-uuid> -AssetPrefix "Sci-Fi Sword "
+
+.EXAMPLE
+    .\tools\import-folders.ps1 -Root "C:\Dev\Assets\Spark City\Buildings" `
+        -Template <asset-uuid> -AssetPrefix "Building " -TextureSet <texture-set-asset-uuid>
+
+.EXAMPLE
+    .\tools\import-folders.ps1 -Root "C:\Dev\Assets\Environment\Spark City\FBX" -Files "SparkCity_Sel_*.fbx" `
+        -Template <asset-uuid> -TextureSet <texture-set-asset-uuid>
 #>
 param(
     [Parameter(Mandatory)] [string] $Root,
@@ -29,6 +43,8 @@ param(
     [string] $Author,
     [string] $License,
     [string] $Message = "Importação inicial",
+    [string[]] $TextureSet = @(),
+    [string] $Files,
     [switch] $Wait,
     [string] $Hangar = (Join-Path $PSScriptRoot "..\target\release\hangar.exe")
 )
@@ -87,19 +103,39 @@ if ($Template) {
 }
 $pushArgs = @("-m", $Message, "--mirror")
 if ($Wait) { $pushArgs += "--wait" }
+foreach ($s in $TextureSet -split ",") { if ($s.Trim()) { $pushArgs += "--texture-set", $s.Trim() } }
+
+# Items to import: (state key, asset name, folder pushed). With -Files each file is
+# copied alone into a staging folder, so the version holds just that file.
+if ($Files) {
+    $staging = Join-Path ([System.IO.Path]::GetTempPath()) "hangar-import"
+    $items = Get-ChildItem $Root -File -Filter $Files | Sort-Object Name | ForEach-Object {
+        $dir = Join-Path $staging $_.BaseName
+        Remove-Item $dir -Recurse -Force -ErrorAction SilentlyContinue
+        New-Item -ItemType Directory $dir | Out-Null
+        Copy-Item $_.FullName $dir
+        [pscustomobject]@{ Key = $_.Name; Name = "$AssetPrefix$($_.BaseName)"; Dir = $dir }
+    }
+    $done = "arquivo(s) importado(s)"
+} else {
+    $items = Get-ChildItem $Root -Directory | Where-Object { -not $_.Name.StartsWith(".") } | Sort-Object Name |
+        ForEach-Object { [pscustomobject]@{ Key = $_.Name; Name = "$AssetPrefix$($_.Name)"; Dir = $_.FullName } }
+    $done = "pasta(s) importada(s)"
+}
+$items = @($items)
+if (-not $items) { throw "nada para importar em $Root" }
 
 $failed = @()
-$folders = Get-ChildItem $Root -Directory | Where-Object { -not $_.Name.StartsWith(".") } | Sort-Object Name
-foreach ($dir in $folders) {
-    $name = "$AssetPrefix$($dir.Name)"
+foreach ($item in $items) {
+    $name = $item.Name
     try {
-        $assetId = $state[$dir.Name]
+        $assetId = $state[$item.Key]
         if (-not $assetId) {
             $assetId = Invoke-Hangar @create --name $name
-            Save-State $dir.Name $assetId
+            Save-State $item.Key $assetId
         }
         Write-Host "`n== $name ($assetId)"
-        & $Hangar push $assetId $dir.FullName @pushArgs
+        & $Hangar push $assetId $item.Dir @pushArgs
         if ($LASTEXITCODE -ne 0) { throw "push falhou (código $LASTEXITCODE)" }
     } catch {
         Write-Warning "${name}: $_"
@@ -107,7 +143,7 @@ foreach ($dir in $folders) {
     }
 }
 
-Write-Host "`n$($folders.Count - $failed.Count)/$($folders.Count) pasta(s) importada(s)"
+Write-Host "`n$($items.Count - $failed.Count)/$($items.Count) $done"
 if ($failed) {
     Write-Warning "falharam: $($failed -join ', ') — rode o script de novo para retomar"
     exit 1

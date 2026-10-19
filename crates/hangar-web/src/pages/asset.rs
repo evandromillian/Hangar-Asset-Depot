@@ -96,6 +96,7 @@ pub fn AssetPage() -> impl IntoView {
     });
     let versions_sig = Signal::derive(move || versions.get());
     let asset_sig = Signal::derive(move || asset_data.get());
+    let project_id = Signal::derive(move || asset_sig.with(|a| a.as_ref().map(|a| a.summary.project_id)));
 
     // Poll while something is being processed.
     let busy = Memo::new(move |_| {
@@ -301,6 +302,7 @@ pub fn AssetPage() -> impl IntoView {
                                 <MaterialsPanel
                                     version=selected_version
                                     asset_id=aid_or_nil
+                                    project_id=project_id
                                     can_write=can_write
                                     draft=draft
                                     on_committed=on_material_commit

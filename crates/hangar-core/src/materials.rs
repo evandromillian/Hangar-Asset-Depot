@@ -6,6 +6,7 @@
 use crate::enums::TextureSlot;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use uuid::Uuid;
 
 /// Version-relative path of the configuration file.
 pub const MATERIAL_CONFIG_PATH: &str = ".hangar/materials.json";
@@ -43,6 +44,11 @@ pub struct MaterialConfig {
     /// carry the threshold of a shader (e.g. Blender's `alpha > 0.03`).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub alpha_cutoff: BTreeMap<String, f32>,
+    /// Texture sets (asset ids) whose head version's images the model may use,
+    /// after its own files: references found by file name, and manual
+    /// assignments as `@<set slug>/<path>`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub texture_sets: Vec<Uuid>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -66,6 +72,7 @@ impl MaterialConfig {
 
     pub fn is_empty(&self) -> bool {
         self.materials.values().all(|m| m.is_empty()) && self.skins.is_empty() && self.alpha_cutoff.is_empty()
+            && self.texture_sets.is_empty()
     }
 
     /// Base assignments for `material`, matched case-insensitively like the viewer does.
@@ -92,12 +99,14 @@ mod tests {
         let json = r#"{
             "materials": { "a1": { "base_color": "T_1001_D.png", "normal": null } },
             "skins": [ { "name": "Deserto", "materials": { "a1": { "base_color": "T_Desert_D.png" } } } ],
-            "alpha_cutoff": { "Net": 0.03, "over": 4 }
+            "alpha_cutoff": { "Net": 0.03, "over": 4 },
+            "texture_sets": ["01a155ca-b530-740d-b235-277cd6b44db8"]
         }"#;
         let cfg = MaterialConfig::from_json(json.as_bytes()).unwrap();
         assert_eq!(cfg.cutoff("net"), Some(0.03));
         assert_eq!(cfg.cutoff("OVER"), Some(1.0));
         assert_eq!(cfg.cutoff("a1"), None);
+        assert_eq!(cfg.texture_sets[0].to_string(), "01a155ca-b530-740d-b235-277cd6b44db8");
         let a1 = cfg.assignments("A1").unwrap();
         assert_eq!(a1[&TextureSlot::BaseColor].as_deref(), Some("T_1001_D.png"));
         assert_eq!(a1[&TextureSlot::Normal], None);

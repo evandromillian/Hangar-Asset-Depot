@@ -149,6 +149,29 @@ versão** que herda a anterior e acrescenta só este arquivo — nenhuma textura
 * O pipeline aplica a base nos GLBs e na thumbnail; problemas (material ou arquivo
   inexistente) viram `warnings`. A CLI envia o arquivo quando ele existe na pasta, e
   `--mirror` nunca o apaga.
+* `alpha_cutoff`: material → limiar (0–1) do recorte de transparência.
+* `texture_sets`: ids de assets cujas imagens o modelo compartilha (ver abaixo).
+
+### Conjuntos de texturas compartilhados (`texture_sets`)
+
+Pacotes como o "Spark City" trazem vários modelos que usam o mesmo conjunto de texturas.
+O conjunto vira **um asset** (tipo textura) e cada modelo o **vincula** em
+`.hangar/materials.json` (`"texture_sets": ["<id do asset>"]`), pela aba **Materiais**
+ou com `hangar push --texture-set <id>` (`tools/import-folders.ps1 -TextureSet <id>`).
+
+* No processamento, o worker baixa as imagens da **head** de cada conjunto para a pasta de
+  trabalho sob `@<slug>/` e as passa em `ProcessInput::texture_sets`. O autor da versão
+  precisa enxergar o conjunto (mesmo projeto, membro do projeto dele ou admin); senão a
+  entrada fica com `error` e o nome não é revelado.
+* As imagens do conjunto ficam **atrás** das da própria versão: referências do modelo que
+  não existem nela são achadas no conjunto pelo nome do arquivo (`resolved_by:
+  "texture-set"`, irmãs como `_Normal` incluídas); as heurísticas por nome de material
+  só olham os arquivos da versão. Atribuição manual usa o caminho `@<slug>/<arquivo>`.
+* O manifesto registra cada conjunto em `texture_sets` (nome, prefixo, versão usada, erro)
+  e lista as imagens dele em `textures` com o prefixo; a UI baixa o original da versão do
+  conjunto (`texture_location`).
+* Uma nova head do conjunto (commit com `set_head` ou troca de head) recoloca na fila as
+  heads cujo manifesto o usa, então todos os modelos pegam as texturas novas.
 
 ### Esqueletos de referência (`.hangar/animation.json`)
 

@@ -69,6 +69,18 @@ pub struct ProcessInput<'a> {
     /// (resolved by the caller), in that order. Used only when the version has
     /// animation files and no mesh of its own.
     pub skeletons: &'a [SkeletonSource],
+    /// The texture sets named by the version's `.hangar/materials.json` (resolved
+    /// by the caller), in that order.
+    pub texture_sets: &'a [TextureSetSource],
+}
+
+/// The head version of a texture set: its images, materialised under the
+/// processed version's `root` at `<info.prefix>/<path>` (the paths of `files`).
+/// The model's own images win; the set's are found by file name or assigned by hand.
+pub struct TextureSetSource {
+    /// Recorded in the manifest as is.
+    pub info: hangar_core::TextureSetUse,
+    pub files: Vec<FileEntry>,
 }
 
 /// The head version of a reference skeleton's asset, materialised on disk like

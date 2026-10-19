@@ -3,13 +3,15 @@
 //! as `.hangar/materials.json` in a new version, which the pipeline bakes.
 //! Per-slot checkboxes hide textures in the preview only; they are never saved.
 //! A per-material alpha cutoff (base look only) makes the material a cutout.
+//! Texture sets (assets of shared images) are linked here too; their images
+//! back the model's after saving.
 
 use crate::api;
 use crate::components::common::ErrorBanner;
 use crate::viewer::{AlphaCutoff, HiddenTexture, ViewerDraft};
 use hangar_core::{
-    CommitVersionRequest, EDITABLE_SLOTS, MATERIAL_CONFIG_PATH, MaterialConfig, MaterialInfo, PreviewKind,
-    PreviewManifest, SkinConfig, TextureOverride, TextureSlot, VersionDto, VersionStatus, blob_url, paths,
+    AssetKind, AssetQuery, CommitVersionRequest, EDITABLE_SLOTS, MATERIAL_CONFIG_PATH, MaterialConfig, MaterialInfo,
+    PreviewKind, PreviewManifest, SkinConfig, TextureOverride, TextureSlot, VersionDto, VersionStatus, blob_url, paths,
 };
 use leptos::prelude::*;
 use leptos::task::spawn_local;
@@ -154,6 +156,8 @@ fn compute_draft(p: &PreviewManifest, cfg: &MaterialConfig, target: Target, hidd
 pub fn MaterialsPanel(
     version: Signal<Option<VersionDto>>,
     asset_id: Signal<Uuid>,
+    /// Project of the asset: its texture assets can be linked as texture sets.
+    project_id: Signal<Option<Uuid>>,
     can_write: Signal<bool>,
     /// Shared with the viewer: unsaved assignments and hidden textures to preview.
     draft: RwSignal<Option<ViewerDraft>>,
@@ -221,6 +225,81 @@ pub fn MaterialsPanel(
     on_cleanup(move || draft.set(None));
 
     let dirty = Memo::new(move |_| baseline.with(|b| b.as_ref().map(pruned)) != Some(edit.with(pruned)));
+
+    // Texture assets of the project, candidates for texture sets.
+    let set_candidates = LocalResource::new(move || {
+        let pid = project_id.get();
+        async move {
+            let Some(pid) = pid else { return vec![] };
+            let q = AssetQuery { kind: Some(AssetKind::Texture), size: Some(100), ..Default::default() };
+            api::assets(pid, &q).await.map(|p| p.items).unwrap_or_default()
+        }
+    });
+    let texture_sets = move || {
+        let linked = edit.with(|c| c.texture_sets.clone());
+        let used = preview.get().map(|p| p.texture_sets).unwrap_or_default();
+        let candidates = set_candidates.get().unwrap_or_default();
+        let own = asset_id.get();
+        let writable = can_write.get() && !saving.get();
+        let rows = linked
+            .iter()
+            .map(|&id| {
+                let processed = used.iter().find(|u| u.asset_id == id);
+                let name = processed
+                    .map(|u| u.name.clone())
+                    .or_else(|| candidates.iter().find(|a| a.id == id).map(|a| a.name.clone()))
+                    .unwrap_or_else(|| id.to_string());
+                let status = match processed {
+                    Some(u) => match (&u.error, u.version_number) {
+                        (Some(e), _) => e.clone(),
+                        (None, Some(n)) => format!("v{n} · {}", u.prefix),
+                        (None, None) => String::new(),
+                    },
+                    None => "aplicado ao salvar".to_string(),
+                };
+                view! {
+                    <li class="mat-set" class:failed=processed.is_some_and(|u| u.error.is_some())>
+                        <a href=format!("/a/{id}") class="clamp-1">{name}</a>
+                        <span class="muted mono">{status}</span>
+                        {writable.then(|| view! {
+                            <button
+                                class="icon-btn"
+                                title="Desvincular"
+                                aria-label="Desvincular"
+                                on:click=move |_| edit.update(|c| c.texture_sets.retain(|s| *s != id))
+                            >
+                                "✕"
+                            </button>
+                        })}
+                    </li>
+                }
+            })
+            .collect_view();
+        let options: Vec<_> = candidates
+            .iter()
+            .filter(|a| a.id != own && !linked.contains(&a.id))
+            .map(|a| view! { <option value=a.id.to_string()>{a.name.clone()}</option> })
+            .collect();
+        view! {
+            <section class="mat-sets">
+                <header>
+                    <b>"Conjuntos de texturas"</b>
+                    <span class="muted hint">"O modelo usa as imagens que referencia e não tem na própria pasta."</span>
+                </header>
+                {(!linked.is_empty()).then(|| view! { <ul class="mat-set-list">{rows}</ul> })}
+                {(writable && !options.is_empty()).then(|| view! {
+                    <select on:change=move |ev| {
+                        if let Ok(id) = event_target_value(&ev).parse::<Uuid>() {
+                            edit.update(|c| c.texture_sets.push(id));
+                        }
+                    }>
+                        <option value="" selected=true>"+ Vincular conjunto de texturas…"</option>
+                        {options}
+                    </select>
+                })}
+            </section>
+        }
+    };
     let skin_names = Memo::new(move |_| edit.with(|c| c.skins.iter().map(|s| s.name.clone()).collect::<Vec<_>>()));
 
     let set_slot = move |material: String, slot: TextureSlot, value: String| {
@@ -617,6 +696,7 @@ pub fn MaterialsPanel(
                     }),
                     Target::Base => None,
                 }}
+                {texture_sets}
                 <Show when=move || preview.with(|p| p.as_ref().is_some_and(|p| p.materials.len() > 6))>
                     <input
                         type="search"

@@ -412,8 +412,10 @@ select { appearance: none; background-image: linear-gradient(45deg, transparent 
 
 /* gallery / audio */
 .gallery { border: 1px solid var(--line); border-radius: var(--radius-lg); overflow: hidden; background: var(--panel); }
-.gallery-main { position: relative; height: clamp(360px, calc(100vh - 330px), 860px); display: grid; place-items: center; }
-.gallery-main img { max-width: 100%; max-height: 100%; object-fit: contain; image-rendering: auto; }
+/* The image is taken out of the flow: as a grid item, a 2K-4K texture sized its
+   track to its natural height and overflowed the stage. */
+.gallery-main { position: relative; height: clamp(360px, calc(100vh - 330px), 860px); overflow: hidden; cursor: zoom-in; }
+.gallery-main img { position: absolute; inset: 12px 12px 40px; margin: auto; max-width: calc(100% - 24px); max-height: calc(100% - 52px); }
 .gallery-caption {
   position: absolute; left: 0; right: 0; bottom: 0; display: flex; gap: 6px; align-items: center; flex-wrap: wrap;
   padding: 7px 12px; background: rgba(13, 15, 17, 0.85); font-size: 11.5px; color: var(--text-2);
@@ -421,7 +423,7 @@ select { appearance: none; background-image: linear-gradient(45deg, transparent 
 .gallery-strip { display: flex; gap: 6px; padding: 8px; overflow-x: auto; border-top: 1px solid var(--line); background: var(--bg-2); }
 .gallery-thumb { flex: 0 0 72px; height: 72px; padding: 0; border: 1px solid var(--line-2); border-radius: var(--radius); cursor: pointer; overflow: hidden; }
 .gallery-thumb.active { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
-.gallery-thumb img { width: 100%; height: 100%; object-fit: cover; }
+.gallery-thumb img { width: 100%; height: 100%; object-fit: contain; }
 .checker {
   background-color: #1a1d21;
   background-image: linear-gradient(45deg, #22262b 25%, transparent 25%), linear-gradient(-45deg, #22262b 25%, transparent 25%),
@@ -540,6 +542,14 @@ select { appearance: none; background-image: linear-gradient(45deg, transparent 
   border-radius: var(--radius); box-shadow: 0 6px 18px rgba(0, 0, 0, 0.5); animation: fade 0.12s ease-out;
 }
 .mat-slot-row select { height: 30px; font-size: 12px; padding-top: 0; padding-bottom: 0; min-width: 0; width: 100%; }
+.mat-sets { display: flex; flex-direction: column; gap: 6px; padding: 10px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--panel-2); }
+.mat-sets header { display: flex; flex-direction: column; gap: 2px; font-size: 12px; }
+.mat-set-list, .set-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.mat-set { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 8px; align-items: center; font-size: 12px; }
+.mat-set.failed .mono, .set-error { color: var(--danger); }
+.mat-sets select { height: 30px; font-size: 12px; }
+.set-list li { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; font-size: 12px; }
+.res-texture-set .slot-res { color: var(--info); border-color: rgba(106, 167, 255, 0.45); }
 .mat-alpha-row input[type="number"] { height: 30px; font-size: 12px; padding-top: 0; padding-bottom: 0; min-width: 0; width: 100%; }
 .mat-thumb { width: 30px; height: 30px; border-radius: 4px; overflow: hidden; border: 1px solid var(--line); display: block; }
 .mat-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
@@ -555,7 +565,38 @@ select { appearance: none; background-image: linear-gradient(45deg, transparent 
 .tex-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(104px, 1fr)); gap: 8px; }
 .tex { margin: 0; display: flex; flex-direction: column; gap: 4px; }
 .tex > div { aspect-ratio: 1; border-radius: var(--radius); overflow: hidden; border: 1px solid var(--line); }
-.tex img { width: 100%; height: 100%; object-fit: cover; }
+.tex { cursor: zoom-in; }
+.tex img { width: 100%; height: 100%; object-fit: contain; }
+
+/* fullscreen texture viewer */
+.texview {
+  position: fixed; inset: 0; z-index: 60; display: flex; flex-direction: column;
+  background: rgba(5, 6, 7, 0.94); animation: fade 0.12s ease-out;
+}
+.texview-bar {
+  display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap;
+  padding: 10px 16px; background: var(--panel); border-bottom: 1px solid var(--line-2);
+}
+.texview-info { display: flex; align-items: center; gap: 10px; min-width: 0; font-size: 12px; flex-wrap: wrap; }
+.texview-info b { max-width: 40ch; }
+.texview-source { font-size: 11.5px; }
+.texview-tools { display: flex; align-items: center; gap: 6px; }
+.texview-tools .btn.active { color: var(--accent); border-color: var(--accent); }
+.texview-zoom { min-width: 5ch; text-align: center; font-size: 12px; color: var(--text-2); }
+.texview-stage { position: relative; flex: 1; overflow: hidden; cursor: grab; touch-action: none; user-select: none; }
+.texview-stage:active { cursor: grabbing; }
+.texview-img { position: absolute; left: 0; top: 0; transform-origin: 0 0; max-width: none; max-height: none; pointer-events: none; }
+.texview-img.pixelated { image-rendering: pixelated; }
+.texview-img.pending { visibility: hidden; }
+.texview-nav {
+  position: absolute; top: 50%; transform: translateY(-50%); width: 40px; height: 64px;
+  font-size: 30px; line-height: 1; color: var(--text); cursor: pointer;
+  background: rgba(13, 15, 17, 0.7); border: 1px solid var(--line-2); border-radius: var(--radius);
+}
+.texview-nav:hover { border-color: var(--accent); color: var(--accent); }
+.texview-nav.prev { left: 12px; }
+.texview-nav.next { right: 12px; }
+.texview-hint { padding: 6px 16px; font-size: 11px; text-align: center; background: var(--panel); border-top: 1px solid var(--line); }
 .tex figcaption { display: flex; flex-direction: column; font-size: 10.5px; }
 
 /* upload */
