@@ -252,6 +252,16 @@ select { appearance: none; background-image: linear-gradient(45deg, transparent 
 .chip:hover { border-color: #46505a; color: var(--text); }
 .chip.active { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
 .tag-filter { width: 140px !important; font-family: var(--font-mono) !important; }
+.filter-end { display: flex; gap: 10px; align-items: center; }
+.view-toggle { display: inline-flex; border: 1px solid var(--line-2); border-radius: var(--radius); overflow: hidden; }
+.view-btn {
+  display: grid; place-items: center; width: 32px; height: 30px; padding: 0;
+  background: transparent; border: 0; color: var(--muted); cursor: pointer;
+}
+.view-btn + .view-btn { border-left: 1px solid var(--line-2); }
+.view-btn:hover { color: var(--text); }
+.view-btn.active { background: var(--accent-soft); color: var(--accent); }
+.view-btn svg { width: 14px; height: 14px; fill: currentColor; }
 
 .asset-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 14px; }
 .asset-card {
@@ -276,6 +286,13 @@ select { appearance: none; background-image: linear-gradient(45deg, transparent 
 .asset-meta { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .asset-tags { display: flex; gap: 8px; flex-wrap: wrap; min-height: 18px; }
 .asset-foot { display: flex; justify-content: space-between; font-size: 12px; margin-top: auto; }
+/* Large cards: 4 per line on wide screens (thumbnails are 512 px, so no upscaling). */
+.asset-grid.large { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 18px; }
+.asset-grid.large .asset-card-body { gap: 9px; padding: 14px 16px 15px; }
+.asset-grid.large .asset-name { font-size: 17px; }
+.asset-grid.large .thumb-placeholder { font-size: 84px; }
+.asset-grid.large .version-tag { top: 10px; left: 10px; padding: 3px 9px; font-size: 12.5px; }
+.asset-grid.large .asset-foot { font-size: 13px; }
 .pager { display: flex; align-items: center; justify-content: center; gap: 16px; margin-top: 24px; }
 
 /* ---------------------------------------------------------------- modal */
@@ -629,6 +646,10 @@ select { appearance: none; background-image: linear-gradient(45deg, transparent 
 @media (max-width: 1180px) {
   .asset-layout { grid-template-columns: minmax(0, 1fr); }
   .side-col { position: static; max-height: none; }
+  .asset-grid.large { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+@media (max-width: 900px) {
+  .asset-grid.large { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 @media (max-width: 720px) {
   .app-main { padding: 18px 16px 40px; }
@@ -637,6 +658,7 @@ select { appearance: none; background-image: linear-gradient(45deg, transparent 
   .form-grid { grid-template-columns: minmax(0, 1fr); }
   .span-2 { grid-column: auto; }
   .asset-grid { grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); }
+  .asset-grid.large { grid-template-columns: minmax(0, 1fr); }
   .viewer-canvas { height: 62vh; }
   .viewer-hint { display: none; }
   .up-row { grid-template-columns: 44px minmax(0, 1fr) 90px 28px; }

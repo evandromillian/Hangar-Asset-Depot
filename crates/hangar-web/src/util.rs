@@ -144,3 +144,14 @@ pub fn parse_tags(s: &str) -> Vec<String> {
 pub fn short_hash(h: &str) -> &str {
     &h[..h.len().min(10)]
 }
+
+/// Per-browser UI preference (localStorage). `None` when storage is unavailable (private mode, blocked).
+pub fn pref_get(key: &str) -> Option<String> {
+    web_sys::window()?.local_storage().ok()??.get_item(key).ok()?
+}
+
+pub fn pref_set(key: &str, value: &str) {
+    if let Some(s) = web_sys::window().and_then(|w| w.local_storage().ok().flatten()) {
+        let _ = s.set_item(key, value);
+    }
+}

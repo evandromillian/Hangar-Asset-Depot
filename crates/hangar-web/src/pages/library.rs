@@ -4,7 +4,7 @@ use crate::api;
 use crate::components::asset_form::NewAssetModal;
 use crate::components::common::{ErrorBanner, KindBadge, StatusBadge};
 use crate::components::members::MembersModal;
-use crate::util::{fmt_ago, kind_glyph, kind_label};
+use crate::util::{fmt_ago, kind_glyph, kind_label, pref_get, pref_set};
 use hangar_core::{AssetKind, AssetQuery, AssetSummary};
 use leptos::prelude::*;
 use leptos_router::components::A;
@@ -13,6 +13,8 @@ use std::time::Duration;
 use uuid::Uuid;
 
 const PAGE_SIZE: u64 = 24;
+/// localStorage key of the card size: "small" (default) or "large".
+const VIEW_PREF: &str = "hangar.library.view";
 
 #[component]
 pub fn LibraryPage() -> impl IntoView {
@@ -35,6 +37,11 @@ pub fn LibraryPage() -> impl IntoView {
     let kind = RwSignal::new(None::<AssetKind>);
     let tag = RwSignal::new(String::new());
     let page = RwSignal::new(0u64);
+    let large = RwSignal::new(pref_get(VIEW_PREF).as_deref() == Some("large"));
+    let set_large = move |v: bool| {
+        large.set(v);
+        pref_set(VIEW_PREF, if v { "large" } else { "small" });
+    };
 
     let debounce = StoredValue::new(None::<TimeoutHandle>);
     Effect::new(move |_| {
@@ -136,16 +143,55 @@ pub fn LibraryPage() -> impl IntoView {
                         })
                         .collect_view()}
                 </div>
-                <input
-                    class="tag-filter"
-                    type="text"
-                    placeholder="filtrar por tag"
-                    prop:value=move || tag.get()
-                    on:change=move |ev| {
-                        tag.set(event_target_value(&ev).trim().trim_start_matches('#').to_lowercase());
-                        page.set(0);
-                    }
-                />
+                <div class="filter-end">
+                    <div class="view-toggle" role="group" aria-label="Tamanho dos cards">
+                        <button
+                            class="view-btn"
+                            class:active=move || !large.get()
+                            title="Cards pequenos"
+                            aria-label="Cards pequenos"
+                            aria-pressed=move || (!large.get()).to_string()
+                            on:click=move |_| set_large(false)
+                        >
+                            <svg viewBox="0 0 16 16" aria-hidden="true">
+                                <rect x="1" y="1" width="4" height="4" rx="0.6" />
+                                <rect x="6" y="1" width="4" height="4" rx="0.6" />
+                                <rect x="11" y="1" width="4" height="4" rx="0.6" />
+                                <rect x="1" y="6" width="4" height="4" rx="0.6" />
+                                <rect x="6" y="6" width="4" height="4" rx="0.6" />
+                                <rect x="11" y="6" width="4" height="4" rx="0.6" />
+                                <rect x="1" y="11" width="4" height="4" rx="0.6" />
+                                <rect x="6" y="11" width="4" height="4" rx="0.6" />
+                                <rect x="11" y="11" width="4" height="4" rx="0.6" />
+                            </svg>
+                        </button>
+                        <button
+                            class="view-btn"
+                            class:active=move || large.get()
+                            title="Cards grandes"
+                            aria-label="Cards grandes"
+                            aria-pressed=move || large.get().to_string()
+                            on:click=move |_| set_large(true)
+                        >
+                            <svg viewBox="0 0 16 16" aria-hidden="true">
+                                <rect x="1" y="1" width="6.5" height="6.5" rx="0.8" />
+                                <rect x="8.5" y="1" width="6.5" height="6.5" rx="0.8" />
+                                <rect x="1" y="8.5" width="6.5" height="6.5" rx="0.8" />
+                                <rect x="8.5" y="8.5" width="6.5" height="6.5" rx="0.8" />
+                            </svg>
+                        </button>
+                    </div>
+                    <input
+                        class="tag-filter"
+                        type="text"
+                        placeholder="filtrar por tag"
+                        prop:value=move || tag.get()
+                        on:change=move |ev| {
+                            tag.set(event_target_value(&ev).trim().trim_start_matches('#').to_lowercase());
+                            page.set(0);
+                        }
+                    />
+                </div>
             </div>
 
             {move || match assets.get() {
@@ -164,7 +210,7 @@ pub fn LibraryPage() -> impl IntoView {
                     let total = p.total;
                     let pages = total.div_ceil(PAGE_SIZE).max(1);
                     view! {
-                        <div class="asset-grid">
+                        <div class="asset-grid" class:large=move || large.get()>
                             {p
                                 .items
                                 .into_iter()
