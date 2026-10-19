@@ -7,7 +7,7 @@
 //! Files with animations keep their node hierarchy, skins and clips as a
 //! [`Rig`] (same model as the FBX importer); meshes stay in world space.
 
-use crate::scene::{AnimClip, Material, MeshPrim, NodeChannel, Rig, Scene, SceneNode, Skin, TexRef, TexSource};
+use crate::scene::{AlphaMode, AnimClip, Material, MeshPrim, NodeChannel, Rig, Scene, SceneNode, Skin, TexRef, TexSource};
 use anyhow::{anyhow, Context, Result};
 use glam::{Mat3, Mat4, Vec3};
 use hangar_core::TextureSlot;
@@ -63,6 +63,11 @@ pub fn load(path: &Path, base_dir: &str, importer: &'static str) -> Result<Scene
         mat.roughness = pbr.roughness_factor();
         mat.emissive = m.emissive_factor();
         mat.double_sided = m.double_sided();
+        mat.alpha = match m.alpha_mode() {
+            gltf::material::AlphaMode::Opaque => AlphaMode::IgnoreTexture,
+            gltf::material::AlphaMode::Mask => AlphaMode::Mask(m.alpha_cutoff().unwrap_or(0.5)),
+            gltf::material::AlphaMode::Blend => AlphaMode::Blend,
+        };
         let mut push = |slot: TextureSlot, tex: Option<gltf::Texture>| {
             if let Some(t) = tex
                 && let Some(src) = image_sources.get(t.source().index())
@@ -107,6 +112,9 @@ pub fn load(path: &Path, base_dir: &str, importer: &'static str) -> Result<Scene
         // KHR_materials_specular feeds the slot.
         push(TextureSlot::Specular, m.specular().and_then(|s| s.specular_color_texture()).map(|t| t.texture()));
         mat.textures.extend(roughness);
+        if mat.alpha == AlphaMode::IgnoreTexture {
+            mat.base_color[3] = 1.0; // OPAQUE ignores the factor's alpha too
+        }
         out.materials.push(mat);
     }
     let default_material = out.materials.len();

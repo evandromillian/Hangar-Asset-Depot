@@ -22,6 +22,8 @@ pub struct GlbMaterial {
     pub double_sided: bool,
     /// "OPAQUE" | "MASK" | "BLEND"
     pub alpha_mode: &'static str,
+    /// Used when `alpha_mode` is "MASK".
+    pub alpha_cutoff: f32,
     pub base_color_tex: Option<usize>,
     pub normal_tex: Option<usize>,
     pub metallic_roughness_tex: Option<usize>,
@@ -42,6 +44,7 @@ impl GlbMaterial {
             emissive: [0.0; 3],
             double_sided: false,
             alpha_mode: "OPAQUE",
+            alpha_cutoff: 0.5,
             base_color_tex: None,
             normal_tex: None,
             metallic_roughness_tex: None,
@@ -267,7 +270,7 @@ pub fn write_glb(meshes: &[MeshPrim], materials: &[GlbMaterial], images: &[Encod
                 "alphaMode": m.alpha_mode,
             });
             if m.alpha_mode == "MASK" {
-                mat["alphaCutoff"] = json!(0.5);
+                mat["alphaCutoff"] = json!(m.alpha_cutoff);
             }
             if let Some(t) = m.normal_tex {
                 mat["normalTexture"] = json!({ "index": t });

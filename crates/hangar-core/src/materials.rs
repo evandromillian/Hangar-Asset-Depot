@@ -38,6 +38,11 @@ pub struct MaterialConfig {
     /// Named texture sets layered on top of the default look.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skins: Vec<SkinConfig>,
+    /// Material name → alpha cutoff (0–1): the material becomes a cutout of its
+    /// base color alpha (or opacity map) at that threshold. A model file can't
+    /// carry the threshold of a shader (e.g. Blender's `alpha > 0.03`).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub alpha_cutoff: BTreeMap<String, f32>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -60,12 +65,21 @@ impl MaterialConfig {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.materials.values().all(|m| m.is_empty()) && self.skins.is_empty()
+        self.materials.values().all(|m| m.is_empty()) && self.skins.is_empty() && self.alpha_cutoff.is_empty()
     }
 
     /// Base assignments for `material`, matched case-insensitively like the viewer does.
     pub fn assignments(&self, material: &str) -> Option<&SlotAssignments> {
         self.materials.iter().find(|(k, _)| k.eq_ignore_ascii_case(material)).map(|(_, v)| v)
+    }
+
+    /// Manual alpha cutoff of `material` (case-insensitive), clamped to 0–1.
+    pub fn cutoff(&self, material: &str) -> Option<f32> {
+        self.alpha_cutoff
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(material))
+            .map(|(_, v)| v.clamp(0.0, 1.0))
+            .filter(|v| v.is_finite())
     }
 }
 
@@ -77,9 +91,13 @@ mod tests {
     fn json_round_trip() {
         let json = r#"{
             "materials": { "a1": { "base_color": "T_1001_D.png", "normal": null } },
-            "skins": [ { "name": "Deserto", "materials": { "a1": { "base_color": "T_Desert_D.png" } } } ]
+            "skins": [ { "name": "Deserto", "materials": { "a1": { "base_color": "T_Desert_D.png" } } } ],
+            "alpha_cutoff": { "Net": 0.03, "over": 4 }
         }"#;
         let cfg = MaterialConfig::from_json(json.as_bytes()).unwrap();
+        assert_eq!(cfg.cutoff("net"), Some(0.03));
+        assert_eq!(cfg.cutoff("OVER"), Some(1.0));
+        assert_eq!(cfg.cutoff("a1"), None);
         let a1 = cfg.assignments("A1").unwrap();
         assert_eq!(a1[&TextureSlot::BaseColor].as_deref(), Some("T_1001_D.png"));
         assert_eq!(a1[&TextureSlot::Normal], None);

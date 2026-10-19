@@ -469,3 +469,232 @@ fn gltf_with_specular_glossiness_material() {
     assert!((rough as i32 - 64).abs() <= 2, "roughness channel {rough}");
     assert!(metal <= 2, "spec/gloss materials are dielectric (lossy encoding aside): {metal}");
 }
+
+/// Alpha of every material of the LOD0 GLB, by name: (mode, cutoff, base color
+/// factor alpha, whether the base color texture has alpha below 255).
+fn glb_alpha(res: &hangar_pipeline::ProcessOutput) -> std::collections::HashMap<String, (String, f32, f32, bool)> {
+    let glb = res.artifacts.iter().find(|a| a.role == ArtifactRole::LodGlb(0)).expect("LOD0 GLB");
+    let g = gltf::Gltf::from_slice(&glb.bytes).unwrap();
+    let buffers = gltf::import_buffers(&g.document, None, g.blob.clone()).unwrap();
+    g.document
+        .materials()
+        .map(|m| {
+            let mode = format!("{:?}", m.alpha_mode()).to_uppercase();
+            let pbr = m.pbr_metallic_roughness();
+            let tex_alpha = pbr.base_color_texture().is_some_and(|t| match t.texture().source().source() {
+                gltf::image::Source::View { view, .. } => {
+                    let data = &buffers[view.buffer().index()][view.offset()..view.offset() + view.length()];
+                    image::load_from_memory(data).unwrap().to_rgba8().pixels().any(|p| p[3] < 255)
+                }
+                _ => panic!("embedded image expected"),
+            });
+            (m.name().unwrap().to_string(), (mode, m.alpha_cutoff().unwrap_or(0.5), pbr.base_color_factor()[3], tex_alpha))
+        })
+        .collect()
+}
+
+fn write_alpha_png(path: &Path, alpha: u8) {
+    image::RgbaImage::from_pixel(8, 8, image::Rgba([120, 130, 110, alpha])).save(path).unwrap();
+}
+
+/// Entries for files written into `dir` (fails early on a fixture typo).
+fn listed(dir: &Path, paths: &[&str]) -> Vec<FileEntry> {
+    paths
+        .iter()
+        .map(|p| {
+            assert!(dir.join(p).exists(), "{p} not written");
+            FileEntry { path: p.to_string(), hash: String::new(), size: 1 }
+        })
+        .collect()
+}
+
+/// The base color's alpha channel only means opacity when the FBX wires it so:
+/// Halo-style textures keep a specular mask there, which used to cut most of the
+/// model away. One triangle per material:
+/// - Hull: diffuse texture with alpha, no transparency link, Maya's opaque
+///   convention (TransparencyFactor 1 × black TransparentColor) → OPAQUE;
+/// - Decal: TransparencyFactor linked to another texture object of the same file
+///   (as Blender writes a wired alpha) → MASK;
+/// - Glass: constant TransparencyFactor 0.65 → BLEND at 0.35, with the texture's
+///   alpha (not opacity) dropped since BLEND would multiply it in;
+/// - Leaf: a separate opacity map → merged into the base color alpha, MASK.
+#[test]
+fn fbx_alpha_follows_the_material_wiring() {
+    let dir = tempfile::tempdir().unwrap();
+    write_alpha_png(&dir.path().join("masked.png"), 40);
+    write_alpha_png(&dir.path().join("leaf.png"), 255);
+    image::GrayImage::from_pixel(8, 8, image::Luma([0])).save(dir.path().join("leaf_opacity.png")).unwrap();
+
+    // (name, TransparencyFactor, TransparentColor, diffuse file, transparency file)
+    let mats: [(&str, f64, f64, &str, Option<&str>); 4] = [
+        ("M_Hull", 1.0, 0.0, "masked.png", None),
+        ("M_Decal", 0.0, 0.0, "masked.png", Some("masked.png")),
+        ("M_Glass", 0.65, 1.0, "masked.png", None),
+        ("M_Leaf", 0.0, 0.0, "leaf.png", Some("leaf_opacity.png")),
+    ];
+    let texture = |id: usize, file: &str| {
+        format!(
+            "\tTexture: {id}, \"Texture::{file}\", \"\" {{\n\t\tType: \"TextureVideoClip\"\n\t\tVersion: 202\n\t\tFileName: \"C:/nowhere/{file}\"\n\t\tRelativeFilename: \"{file}\"\n\t}}\n"
+        )
+    };
+    let mut objects = String::new();
+    let mut conns = String::new();
+    for (i, (name, factor, color, diffuse, transp)) in mats.iter().enumerate() {
+        let (geo, model, mat, tex, ttex) = (1000 + i, 2000 + i, 3000 + i, 4000 + i, 5000 + i);
+        let (x0, x1) = (i as f64 * 200.0, i as f64 * 200.0 + 100.0);
+        write!(
+            objects,
+            "\tGeometry: {geo}, \"Geometry::{name}\", \"Mesh\" {{\n\t\tVertices: *9 {{\n\t\t\ta: {x0},0,0,{x1},0,0,{x0},100,0\n\t\t}}\n\
+             \t\tPolygonVertexIndex: *3 {{\n\t\t\ta: 0,1,-3\n\t\t}}\n\t\tGeometryVersion: 124\n\t}}\n\
+             \tModel: {model}, \"Model::{name}\", \"Mesh\" {{\n\t\tVersion: 232\n\t}}\n\
+             \tMaterial: {mat}, \"Material::{name}\", \"\" {{\n\t\tVersion: 102\n\t\tShadingModel: \"phong\"\n\t\tProperties70:  {{\n\
+             \t\t\tP: \"DiffuseColor\", \"Color\", \"\", \"A\",0.8,0.8,0.8\n\
+             \t\t\tP: \"TransparentColor\", \"Color\", \"\", \"A\",{color},{color},{color}\n\
+             \t\t\tP: \"TransparencyFactor\", \"Number\", \"\", \"A\",{factor}\n\t\t}}\n\t}}\n"
+        )
+        .unwrap();
+        objects += &texture(tex, diffuse);
+        writeln!(conns, "\tC: \"OO\",{model},0\n\tC: \"OO\",{geo},{model}\n\tC: \"OO\",{mat},{model}\n\tC: \"OP\",{tex},{mat}, \"DiffuseColor\"").unwrap();
+        if let Some(t) = transp {
+            objects += &texture(ttex, t);
+            writeln!(conns, "\tC: \"OP\",{ttex},{mat}, \"TransparencyFactor\"").unwrap();
+        }
+    }
+    let fbx = format!(
+        "; FBX 7.4.0 project file\nFBXHeaderExtension:  {{\n\tFBXHeaderVersion: 1003\n\tFBXVersion: 7400\n}}\n\
+         Objects:  {{\n{objects}}}\nConnections:  {{\n{conns}}}\n"
+    );
+    std::fs::write(dir.path().join("props.fbx"), fbx).unwrap();
+    let files = listed(dir.path(), &["props.fbx", "masked.png", "leaf.png", "leaf_opacity.png"]);
+    let res = process(&ProcessInput { root: dir.path(), files: &files, skeletons: &[] }, &PipelineConfig::default()).unwrap();
+    assert_eq!(res.manifest.model_error, None, "warnings: {:?}", res.manifest.warnings);
+    let a = glb_alpha(&res);
+
+    assert_eq!(a["M_Hull"].0, "OPAQUE", "{:?}", a["M_Hull"]);
+    assert_eq!(a["M_Hull"].2, 1.0, "Maya's black TransparentColor means opaque");
+    assert_eq!(a["M_Decal"].0, "MASK", "{:?}", a["M_Decal"]);
+    assert!(a["M_Decal"].3, "the cutout keeps the texture's alpha");
+    let glass = &a["M_Glass"];
+    assert_eq!(glass.0, "BLEND", "{glass:?}");
+    assert!((glass.2 - 0.35).abs() < 1e-3, "opacity 1 − 0.65 × 1: {glass:?}");
+    assert!(!glass.3, "a specular mask must not modulate the blend");
+    assert_eq!(a["M_Leaf"].0, "MASK", "{:?}", a["M_Leaf"]);
+    assert!(a["M_Leaf"].3, "opacity map merged into the base color alpha");
+}
+
+/// glTF states the alpha mode itself: an OPAQUE material ignores the alpha of its
+/// texture and factor, a MASK keeps its cutoff.
+#[test]
+fn gltf_alpha_mode_is_kept() {
+    let dir = tempfile::tempdir().unwrap();
+    let positions: [f32; 9] = [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+    let uvs: [f32; 6] = [0.0, 0.0, 1.0, 0.0, 0.0, 1.0];
+    let bin: Vec<u8> = positions.iter().chain(&uvs).flat_map(|f| f.to_le_bytes()).collect();
+    std::fs::write(dir.path().join("Crate.bin"), &bin).unwrap();
+    write_alpha_png(&dir.path().join("crate.png"), 40);
+    let gltf = format!(
+        r#"{{
+  "asset": {{ "version": "2.0" }},
+  "scene": 0, "scenes": [{{ "nodes": [0, 1] }}], "nodes": [{{ "mesh": 0 }}, {{ "mesh": 1 }}],
+  "meshes": [
+    {{ "primitives": [{{ "attributes": {{ "POSITION": 0, "TEXCOORD_0": 1 }}, "material": 0 }}] }},
+    {{ "primitives": [{{ "attributes": {{ "POSITION": 0, "TEXCOORD_0": 1 }}, "material": 1 }}] }}
+  ],
+  "materials": [
+    {{ "name": "M_Opaque", "pbrMetallicRoughness": {{ "baseColorTexture": {{ "index": 0 }}, "baseColorFactor": [1, 1, 1, 0.5] }} }},
+    {{ "name": "M_Cutout", "alphaMode": "MASK", "alphaCutoff": 0.3, "pbrMetallicRoughness": {{ "baseColorTexture": {{ "index": 0 }} }} }}
+  ],
+  "textures": [{{ "source": 0 }}],
+  "images": [{{ "uri": "crate.png" }}],
+  "buffers": [{{ "uri": "Crate.bin", "byteLength": {len} }}],
+  "bufferViews": [{{ "buffer": 0, "byteOffset": 0, "byteLength": 36 }}, {{ "buffer": 0, "byteOffset": 36, "byteLength": 24 }}],
+  "accessors": [
+    {{ "bufferView": 0, "componentType": 5126, "count": 3, "type": "VEC3", "min": [0, 0, 0], "max": [1, 1, 0] }},
+    {{ "bufferView": 1, "componentType": 5126, "count": 3, "type": "VEC2" }}
+  ]
+}}"#,
+        len = bin.len()
+    );
+    std::fs::write(dir.path().join("Crate.gltf"), gltf).unwrap();
+    let files = listed(dir.path(), &["Crate.gltf", "Crate.bin", "crate.png"]);
+    let res = process(&ProcessInput { root: dir.path(), files: &files, skeletons: &[] }, &PipelineConfig::default()).unwrap();
+    let a = glb_alpha(&res);
+    assert_eq!((a["M_Opaque"].0.as_str(), a["M_Opaque"].2), ("OPAQUE", 1.0), "{:?}", a["M_Opaque"]);
+    assert_eq!((a["M_Cutout"].0.as_str(), a["M_Cutout"].1), ("MASK", 0.3), "{:?}", a["M_Cutout"]);
+}
+
+/// OBJ can't say how alpha is used: a base color texture with alpha stays a cutout.
+#[test]
+fn obj_base_color_alpha_is_a_cutout() {
+    let dir = tempfile::tempdir().unwrap();
+    let obj = "mtllib leaf.mtl\nv 0 0 0\nv 1 0 0\nv 0 1 0\nvt 0 0\nvt 1 0\nvt 0 1\nusemtl M_Leaf\nf 1/1 2/2 3/3\n";
+    std::fs::write(dir.path().join("leaf.obj"), obj).unwrap();
+    std::fs::write(dir.path().join("leaf.mtl"), "newmtl M_Leaf\nKd 1 1 1\nmap_Kd leaf.png\n").unwrap();
+    write_alpha_png(&dir.path().join("leaf.png"), 40);
+    let files = listed(dir.path(), &["leaf.obj", "leaf.mtl", "leaf.png"]);
+    let res = process(&ProcessInput { root: dir.path(), files: &files, skeletons: &[] }, &PipelineConfig::default()).unwrap();
+    assert_eq!(glb_alpha(&res)["M_Leaf"].0, "MASK");
+}
+
+/// An opacity map assigned by hand that is a colour texture with a cutout in its
+/// alpha (typically the base color itself, when the exporter lost the wiring)
+/// gives its alpha channel, not its red one.
+#[test]
+fn manual_opacity_map_uses_its_alpha_channel() {
+    let dir = tempfile::tempdir().unwrap();
+    let obj = "mtllib net.mtl\nv 0 0 0\nv 1 0 0\nv 0 1 0\nvt 0 0\nvt 1 0\nvt 0 1\nusemtl M_Net\nf 1/1 2/2 3/3\n";
+    std::fs::write(dir.path().join("net.obj"), obj).unwrap();
+    std::fs::write(dir.path().join("net.mtl"), "newmtl M_Net\nKd 1 1 1\nmap_Kd net.png\n").unwrap();
+    // Red 255: the old red-channel merge would make it fully opaque.
+    image::RgbaImage::from_pixel(8, 8, image::Rgba([255, 200, 100, 40])).save(dir.path().join("net.png")).unwrap();
+    std::fs::create_dir_all(dir.path().join(".hangar")).unwrap();
+    std::fs::write(dir.path().join(MATERIAL_CONFIG_PATH), r#"{ "materials": { "M_Net": { "opacity": "net.png" } } }"#)
+        .unwrap();
+    let files = listed(dir.path(), &["net.obj", "net.mtl", "net.png", MATERIAL_CONFIG_PATH]);
+    let res = process(&ProcessInput { root: dir.path(), files: &files, skeletons: &[] }, &PipelineConfig::default()).unwrap();
+    assert!(res.manifest.warnings.is_empty(), "warnings: {:?}", res.manifest.warnings);
+    let net = &glb_alpha(&res)["M_Net"];
+    assert_eq!(net.0, "MASK", "{net:?}");
+    assert!(net.3, "the cutout comes from the map's alpha channel: {net:?}");
+}
+
+/// A cutoff set in `.hangar/materials.json` reaches the GLB, the manifest and
+/// the thumbnail: texture alpha 40/255 (≈0.16) vanishes at the default 0.5 but
+/// shows at 0.1, like Blender's `alpha > 0.03` cutouts that FBX can't carry.
+#[test]
+fn manual_alpha_cutoff() {
+    let dir = tempfile::tempdir().unwrap();
+    let obj = "mtllib net.mtl\nv -1 -1 0\nv 1 -1 0\nv 0 1 0\nvt 0 0\nvt 1 0\nvt 0 1\nusemtl M_Net\nf 1/1 2/2 3/3\n";
+    std::fs::write(dir.path().join("net.obj"), obj).unwrap();
+    std::fs::write(dir.path().join("net.mtl"), "newmtl M_Net\nKd 1 1 1\nmap_Kd net.png\n").unwrap();
+    write_alpha_png(&dir.path().join("net.png"), 40);
+    let run = |config: Option<&str>| {
+        if let Some(json) = config {
+            std::fs::create_dir_all(dir.path().join(".hangar")).unwrap();
+            std::fs::write(dir.path().join(MATERIAL_CONFIG_PATH), json).unwrap();
+        }
+        let mut paths = vec!["net.obj", "net.mtl", "net.png"];
+        paths.extend(config.map(|_| MATERIAL_CONFIG_PATH));
+        let files = listed(dir.path(), &paths);
+        process(&ProcessInput { root: dir.path(), files: &files, skeletons: &[] }, &PipelineConfig::default()).unwrap()
+    };
+    let covered = |res: &hangar_pipeline::ProcessOutput| {
+        let thumb = res.artifacts.iter().find(|a| a.role == ArtifactRole::Thumbnail).unwrap();
+        let img = image::load_from_memory(&thumb.bytes).unwrap().to_rgba8();
+        // The background is a vertical gradient: compare with the row's first pixel.
+        img.enumerate_pixels().filter(|(_, y, p)| **p != *img.get_pixel(0, *y)).count()
+    };
+
+    let auto = run(None);
+    let info = &auto.manifest.materials[0];
+    assert_eq!((info.alpha_mode.as_deref(), info.alpha_cutoff), (Some("MASK"), Some(0.5)));
+    assert_eq!(covered(&auto), 0, "alpha 0.16 is cut away at 0.5");
+
+    let manual = run(Some(r#"{ "alpha_cutoff": { "m_net": 0.1, "M_Missing": 0.5 } }"#));
+    let info = &manual.manifest.materials[0];
+    assert_eq!((info.alpha_mode.as_deref(), info.alpha_cutoff), (Some("MASK"), Some(0.1)));
+    let net = &glb_alpha(&manual)["M_Net"];
+    assert_eq!((net.0.as_str(), net.1), ("MASK", 0.1), "{net:?}");
+    assert!(covered(&manual) > 100, "the triangle shows at cutoff 0.1");
+    assert!(manual.manifest.warnings.iter().any(|w| w.contains("M_Missing")), "{:?}", manual.manifest.warnings);
+}

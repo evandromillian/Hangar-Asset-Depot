@@ -1,6 +1,6 @@
 //! FBX import through ufbx.
 
-use crate::scene::{AnimClip, Material, NodeChannel, Rig, Scene, SceneNode, Skin, TexRef, TexSource, VertexDedup};
+use crate::scene::{AlphaMode, AnimClip, Material, NodeChannel, Rig, Scene, SceneNode, Skin, TexRef, TexSource, VertexDedup};
 use anyhow::{anyhow, Result};
 use hangar_core::{paths, TextureSlot};
 use std::collections::HashMap;
@@ -445,7 +445,7 @@ fn convert_material(m: &ufbx::Material, base_dir: &str) -> Material {
     let pbr = &m.pbr;
     let bc = pbr.base_color.value_vec4;
     let bf = if pbr.base_factor.has_value { pbr.base_factor.value_vec4.x } else { 1.0 };
-    let opacity = if pbr.opacity.has_value { pbr.opacity.value_vec4.x } else { 1.0 };
+    let opacity = constant_opacity(m);
     if pbr.base_color.has_value {
         out.base_color = [
             (bc.x * bf).clamp(0.0, 1.0) as f32,
@@ -484,7 +484,18 @@ fn convert_material(m: &ufbx::Material, base_dir: &str) -> Material {
     push(TextureSlot::Occlusion, &pbr.ambient_occlusion);
     push(TextureSlot::Emissive, &pbr.emission_color);
     push(TextureSlot::Emissive, &m.fbx.emission_color);
-    push(TextureSlot::Opacity, &pbr.opacity);
+    // Blender writes an alpha wired to opacity as a TransparencyFactor texture; other
+    // exporters use TransparentColor or the PBR opacity. The same image as the base
+    // color means "use its alpha channel"; a separate one is an opacity map.
+    let base_tex = [&pbr.base_color, &m.fbx.diffuse_color].into_iter().find_map(|map| map.texture.as_ref());
+    let opacity_map = [&pbr.opacity, &m.fbx.transparency_factor, &m.fbx.transparency_color]
+        .into_iter()
+        .find(|map| map.texture.is_some());
+    if let Some(map) = opacity_map
+        && !base_tex.zip(map.texture.as_ref()).is_some_and(|(b, t)| same_image(b, t))
+    {
+        push(TextureSlot::Opacity, map);
+    }
     push(TextureSlot::Specular, &pbr.specular_color);
     push(TextureSlot::Specular, &m.fbx.specular_color);
     push(TextureSlot::Specular, &pbr.specular_factor);
@@ -513,5 +524,35 @@ fn convert_material(m: &ufbx::Material, base_dir: &str) -> Material {
     }
     let mut seen = std::collections::HashSet::new();
     out.textures.retain(|t| seen.insert(t.slot));
+
+    // A linked base color without a linked opacity: whatever its alpha channel holds
+    // (Halo specular masks, Unreal roughness...) is not transparency.
+    out.alpha = match (base_tex.is_some(), opacity_map.is_some()) {
+        (_, true) => AlphaMode::Mask(0.5),
+        (true, false) => AlphaMode::IgnoreTexture,
+        (false, false) => AlphaMode::Auto,
+    };
     out
+}
+
+/// The material's constant opacity: the PBR value, else 1 − TransparentColor ×
+/// TransparencyFactor (Maya writes factor 1 with a black color on opaque materials,
+/// so the factor alone is not enough).
+fn constant_opacity(m: &ufbx::Material) -> f64 {
+    if m.pbr.opacity.has_value {
+        return m.pbr.opacity.value_vec4.x;
+    }
+    let (f, c) = (&m.fbx.transparency_factor, &m.fbx.transparency_color);
+    let factor = if f.has_value { f.value_vec4.x } else { 1.0 };
+    let color = if c.has_value { (c.value_vec4.x + c.value_vec4.y + c.value_vec4.z) / 3.0 } else { 1.0 };
+    if f.has_value || c.has_value { 1.0 - factor * color } else { 1.0 }
+}
+
+/// Exporters may write one texture object per slot for the same image file.
+fn same_image(a: &ufbx::Texture, b: &ufbx::Texture) -> bool {
+    let key = |t: &ufbx::Texture| {
+        let candidates: [&str; 3] = [&t.relative_filename, &t.filename, &t.absolute_filename];
+        candidates.into_iter().find(|s| !s.is_empty()).map(|s| s.replace('\\', "/").to_ascii_lowercase())
+    };
+    a.element.element_id == b.element.element_id || key(a).is_some_and(|k| key(b) == Some(k))
 }

@@ -8,7 +8,8 @@ pub struct ThumbMaterial<'a> {
     /// Linear base colour factor.
     pub base_color: [f32; 4],
     pub texture: Option<&'a RgbaImage>,
-    pub alpha_test: bool,
+    /// Cutout threshold of the texture's alpha (glTF MASK); `None` = opaque.
+    pub alpha_cutoff: Option<f32>,
 }
 
 fn srgb_to_linear(c: f32) -> f32 {
@@ -67,7 +68,7 @@ pub fn render_thumbnail(meshes: &[MeshPrim], materials: &[ThumbMaterial], size: 
             let mat = m.material.and_then(|i| materials.get(i));
             let base = mat.map(|m| m.base_color).unwrap_or([0.6, 0.6, 0.6, 1.0]);
             let tex = mat.and_then(|m| m.texture);
-            let alpha_test = mat.map(|m| m.alpha_test).unwrap_or(false);
+            let alpha_cutoff = mat.and_then(|m| m.alpha_cutoff);
             let has_n = m.normals.len() == m.positions.len();
             let has_uv = m.uvs.len() == m.positions.len() && tex.is_some();
             // project
@@ -140,7 +141,7 @@ pub fn render_thumbnail(meshes: &[MeshPrim], materials: &[ThumbMaterial], size: 
                             let u = pw0 * uv0[0] + pw1 * uv1[0] + pw2 * uv2[0];
                             let v = pw0 * uv0[1] + pw1 * uv1[1] + pw2 * uv2[1];
                             let s = crate::images::sample(t, u, v);
-                            if alpha_test && s[3] < 0.4 {
+                            if alpha_cutoff.is_some_and(|c| s[3] < c) {
                                 continue;
                             }
                             albedo = [
@@ -261,7 +262,7 @@ mod tests {
             indices: vec![0, 1, 2, 0, 2, 3],
             ..Default::default()
         };
-        let mats = [ThumbMaterial { base_color: [1.0, 0.0, 0.0, 1.0], texture: None, alpha_test: false }];
+        let mats = [ThumbMaterial { base_color: [1.0, 0.0, 0.0, 1.0], texture: None, alpha_cutoff: None }];
         let img = render_thumbnail(&[m], &mats, 64);
         let c = img.get_pixel(32, 32).0;
         assert!(c[0] > 100 && c[1] < 60, "center pixel {c:?}");

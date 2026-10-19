@@ -139,6 +139,17 @@ prepared statements. Add `?sslmode=require`.
   animation files were made for it (`fbx::animates`: half of a file's named nodes exist in
   the mesh); meshes sharing no bones (props of an animation package) are ignored instead.
   An animation asset is a package: any number of animation FBX files, added over versions.
+- Alpha: importers record what the file says in `scene::Material::alpha` (`AlphaMode`); the
+  export and the thumbnail decide through `process::gltf_alpha`. FBX: a linked base color
+  without a linked transparency (`TransparencyFactor`/`TransparentColor`/opacity) ignores the
+  texture's alpha — game textures pack masks there (Halo specular); glTF keeps its
+  `alphaMode`; OBJ and name-matched textures stay `Auto` (alpha in the base color = cutout).
+  An Opacity map is merged into the base color alpha (GLB and thumbnail) from its own alpha
+  channel when it has one, else from its red channel (`images::merge_alpha`).
+  `MaterialConfig::alpha_cutoff` (per material, "Recorte alfa" in the Materiais tab) forces
+  `Mask(cutoff)` — model files can't carry a shader's threshold. The manifest's
+  `MaterialInfo::alpha_mode` / `alpha_cutoff` record what was baked; the viewer previews
+  unsaved cutoffs as Bevy `AlphaMode::Mask`.
 - Recoverable problems go to `manifest.warnings`, not errors. Fail only when nothing can be previewed.
 - Heuristics (texture resolution, slot tokens, variant detection, LOD suffixes) are unit-tested in
   their modules; extend those tests when changing them.

@@ -4,7 +4,7 @@ use crate::glb::{self, EncodedImage, GlbMaterial};
 use crate::images::{self, Decoded, ImageCache};
 use crate::lod::{self, LodLevel};
 use crate::raster::{self, ThumbMaterial};
-use crate::scene::{Aabb, AnimClip, Material, MeshPrim, Scene};
+use crate::scene::{Aabb, AlphaMode, AnimClip, Material, MeshPrim, Scene};
 use crate::textures::{self, ImageIndex, ResolvedTexture};
 use crate::variants::{self, UsedTexture};
 use crate::{import, pose, Artifact, ArtifactRole, PipelineConfig, ProcessInput, ProcessOutput, SkeletonSource};
@@ -361,6 +361,9 @@ fn build_model(
     }
 
     // ---- textures
+    if let Some(cfg) = manual {
+        apply_cutoffs(cfg, &mut materials, warnings);
+    }
     let index = ImageIndex::new(images.to_vec());
     let resolved = textures::resolve_materials(&materials, &index, manual, warnings);
     let used: Vec<UsedTexture> = materials
@@ -396,27 +399,33 @@ fn build_model(
         add_manual_skins(cfg, &materials, &index, preview_by_path, manifest, warnings);
     }
 
+    let decoded = decode_all(input.root, cache, &materials, &resolved);
+
     manifest.materials = materials
         .iter()
         .zip(&resolved)
-        .map(|(m, rs)| MaterialInfo {
-            name: m.name.clone(),
-            base_color: m.base_color,
-            metallic: m.metallic,
-            roughness: m.roughness,
-            textures: rs
-                .iter()
-                .map(|r| MaterialTexture {
-                    slot: r.slot,
-                    path: r.path.clone(),
-                    original: r.original.clone(),
-                    resolved_by: r.resolved_by.to_string(),
-                })
-                .collect(),
+        .zip(&decoded)
+        .map(|((m, rs), list)| {
+            let (mode, cutoff) = material_alpha(m, list);
+            MaterialInfo {
+                name: m.name.clone(),
+                base_color: m.base_color,
+                metallic: m.metallic,
+                roughness: m.roughness,
+                textures: rs
+                    .iter()
+                    .map(|r| MaterialTexture {
+                        slot: r.slot,
+                        path: r.path.clone(),
+                        original: r.original.clone(),
+                        resolved_by: r.resolved_by.to_string(),
+                    })
+                    .collect(),
+                alpha_mode: Some(mode.to_string()),
+                alpha_cutoff: (mode == "MASK").then_some(cutoff),
+            }
         })
         .collect();
-
-    let decoded = decode_all(input.root, cache, &materials, &resolved);
 
     // ---- GLB per level
     for level in &levels {
@@ -577,6 +586,9 @@ fn build_on_skeleton(
 
     let mut quiet = Vec::new();
     let manual = load_material_config(&sk.root, &files, &mut quiet);
+    if let Some(cfg) = &manual {
+        apply_cutoffs(cfg, &mut scene.materials, &mut quiet);
+    }
     let index = ImageIndex::new(images);
     let resolved = textures::resolve_materials(&scene.materials, &index, manual.as_ref(), &mut quiet);
     let tex_size = SKELETON_TEXTURE_SIZE.min(cfg.max_texture_size);
@@ -628,12 +640,15 @@ fn render_thumbnail(
     let thumb_textures: Vec<Option<image::RgbaImage>> = decoded
         .iter()
         .map(|list| {
-            list.iter().find(|(s, _)| *s == TextureSlot::BaseColor).map(|(_, d)| {
-                let img = &d.image;
+            let get = |slot: TextureSlot| list.iter().find(|(s, _)| *s == slot).map(|(_, d)| d);
+            get(TextureSlot::BaseColor).map(|d| {
+                // Same alpha as the GLB: an opacity map replaces the base color's alpha.
+                let merged = get(TextureSlot::Opacity).map(|o| images::merge_alpha(&d.image, o));
+                let img = merged.as_ref().unwrap_or(&d.image);
                 if img.width().max(img.height()) > 512 {
-                    image::imageops::thumbnail(&**img, 512, 512)
+                    image::imageops::thumbnail(img, 512, 512)
                 } else {
-                    (**img).clone()
+                    img.clone()
                 }
             })
         })
@@ -650,7 +665,10 @@ fn render_thumbnail(
             ThumbMaterial {
                 base_color: base,
                 texture: tex,
-                alpha_test: decoded[i].iter().any(|(s, d)| *s == TextureSlot::BaseColor && d.has_alpha),
+                alpha_cutoff: match material_alpha(m, &decoded[i]) {
+                    ("MASK", cutoff) => Some(cutoff),
+                    _ => None,
+                },
             }
         })
         .collect();
@@ -724,6 +742,42 @@ fn decode_resolved(root: &Path, cache: &mut ImageCache, mat: &str, r: &ResolvedT
     cache.get_bytes(&format!("embedded:{mat}:{}", r.slot), bytes)
 }
 
+/// Manual cutoffs of `.hangar/materials.json` turn their materials into cutouts.
+fn apply_cutoffs(cfg: &MaterialConfig, materials: &mut [Material], warnings: &mut Vec<String>) {
+    for name in cfg.alpha_cutoff.keys() {
+        if !materials.iter().any(|m| m.name.eq_ignore_ascii_case(name)) {
+            warnings.push(format!("{MATERIAL_CONFIG_PATH}: alpha cutoff for '{name}', which does not exist in the model"));
+        }
+    }
+    for m in materials {
+        if let Some(cutoff) = cfg.cutoff(&m.name) {
+            m.alpha = AlphaMode::Mask(cutoff);
+        }
+    }
+}
+
+/// [`gltf_alpha`] of a material with its decoded textures.
+fn material_alpha(m: &Material, textures: &[(TextureSlot, Arc<Decoded>)]) -> (&'static str, f32) {
+    let base_alpha = textures.iter().any(|(s, d)| *s == TextureSlot::BaseColor && d.has_alpha);
+    let opacity_map = textures.iter().any(|(s, _)| *s == TextureSlot::Opacity);
+    gltf_alpha(m.alpha, m.base_color[3], base_alpha, opacity_map)
+}
+
+/// glTF alpha mode and cutoff of a material. What the source file says wins, except
+/// that an opacity map (possibly assigned by hand) makes a cutout of a material
+/// whose texture alpha is ignored. When the file doesn't say, alpha in the base
+/// color texture is a cutout. A constant opacity below 1 blends.
+fn gltf_alpha(alpha: AlphaMode, opacity: f32, base_has_alpha: bool, opacity_map: bool) -> (&'static str, f32) {
+    match alpha {
+        AlphaMode::Mask(cutoff) => ("MASK", cutoff),
+        AlphaMode::Blend => ("BLEND", 0.5),
+        _ if opacity_map => ("MASK", 0.5),
+        AlphaMode::Auto if base_has_alpha => ("MASK", 0.5),
+        _ if opacity < 0.99 => ("BLEND", 0.5),
+        _ => ("OPAQUE", 0.5),
+    }
+}
+
 /// Build glTF materials and the (encoded, downscaled) images they reference.
 fn build_glb_materials(
     materials: &[Material],
@@ -765,21 +819,19 @@ fn build_glb_materials(
 
         let base = get(TextureSlot::BaseColor);
         let opacity = get(TextureSlot::Opacity);
+        let base_alpha = base.as_ref().is_some_and(|b| b.has_alpha);
+        (g.alpha_mode, g.alpha_cutoff) = material_alpha(m, list);
         if let Some(b) = &base {
             g.base_color = [1.0, 1.0, 1.0, m.base_color[3]];
-            if let Some(o) = &opacity {
-                let merged = images::merge_alpha(&b.image, &o.image);
-                g.base_color_tex = Some(add_generated(&mut imgs, format!("{}_basecolor", m.name), &merged, true));
-                g.alpha_mode = "MASK";
-            } else {
-                g.base_color_tex = Some(add_decoded(&mut imgs, format!("{}_basecolor", m.name), b));
-                if b.has_alpha {
-                    g.alpha_mode = "MASK";
+            let name = format!("{}_basecolor", m.name);
+            g.base_color_tex = Some(match &opacity {
+                Some(o) => add_generated(&mut imgs, name, &images::merge_alpha(&b.image, o), true),
+                // BLEND multiplies the texture's alpha in: drop one that isn't opacity.
+                None if g.alpha_mode == "BLEND" && m.alpha == AlphaMode::IgnoreTexture && base_alpha => {
+                    add_generated(&mut imgs, name, &images::without_alpha(&b.image), false)
                 }
-            }
-        }
-        if g.alpha_mode == "OPAQUE" && m.base_color[3] < 0.99 {
-            g.alpha_mode = "BLEND";
+                None => add_decoded(&mut imgs, name, b),
+            });
         }
         if let Some(n) = get(TextureSlot::Normal) {
             g.normal_tex = Some(add_decoded(&mut imgs, format!("{}_normal", m.name), &n));
@@ -849,5 +901,28 @@ mod tests {
         // Separate animation files (`Model@Clip`) lose to the model itself.
         let sel = select_model(&s(&["Shark@Attack.fbx", "Shark.fbx", "Shark@Swim.fbx"])).unwrap();
         assert_eq!(sel.primary, "Shark.fbx");
+    }
+
+    #[test]
+    fn alpha_mode_rules() {
+        use AlphaMode::*;
+        // (source says, constant opacity, base texture has alpha, opacity map) -> mode
+        let cases = [
+            (Auto, 1.0, false, false, "OPAQUE"),
+            (Auto, 1.0, true, false, "MASK"),
+            (Auto, 1.0, false, true, "MASK"),
+            (Auto, 0.5, false, false, "BLEND"),
+            // A specular mask in the alpha channel is not transparency...
+            (IgnoreTexture, 1.0, true, false, "OPAQUE"),
+            (IgnoreTexture, 0.35, true, false, "BLEND"),
+            // ...but an opacity map assigned by hand still cuts out.
+            (IgnoreTexture, 1.0, true, true, "MASK"),
+            (Mask(0.3), 1.0, false, false, "MASK"),
+            (Blend, 1.0, true, true, "BLEND"),
+        ];
+        for (alpha, opacity, base_alpha, map, want) in cases {
+            assert_eq!(gltf_alpha(alpha, opacity, base_alpha, map).0, want, "{alpha:?} {opacity} {base_alpha} {map}");
+        }
+        assert_eq!(gltf_alpha(Mask(0.3), 1.0, true, false).1, 0.3);
     }
 }

@@ -540,6 +540,7 @@ select { appearance: none; background-image: linear-gradient(45deg, transparent 
   border-radius: var(--radius); box-shadow: 0 6px 18px rgba(0, 0, 0, 0.5); animation: fade 0.12s ease-out;
 }
 .mat-slot-row select { height: 30px; font-size: 12px; padding-top: 0; padding-bottom: 0; min-width: 0; width: 100%; }
+.mat-alpha-row input[type="number"] { height: 30px; font-size: 12px; padding-top: 0; padding-bottom: 0; min-width: 0; width: 100%; }
 .mat-thumb { width: 30px; height: 30px; border-radius: 4px; overflow: hidden; border: 1px solid var(--line); display: block; }
 .mat-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
 .mat-reset { margin: 4px 10px 8px; }

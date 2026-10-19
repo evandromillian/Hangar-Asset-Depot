@@ -93,6 +93,13 @@ pub struct MaterialInfo {
     pub metallic: f32,
     pub roughness: f32,
     pub textures: Vec<MaterialTexture>,
+    /// glTF alpha mode baked into the GLBs: "OPAQUE", "MASK" or "BLEND"
+    /// (absent in manifests written before it was recorded).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alpha_mode: Option<String>,
+    /// Cutoff of a "MASK" material.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alpha_cutoff: Option<f32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

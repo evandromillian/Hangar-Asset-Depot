@@ -2,10 +2,11 @@
 //! author skins. Edits are previewed live in the viewer (as a draft) and saved
 //! as `.hangar/materials.json` in a new version, which the pipeline bakes.
 //! Per-slot checkboxes hide textures in the preview only; they are never saved.
+//! A per-material alpha cutoff (base look only) makes the material a cutout.
 
 use crate::api;
 use crate::components::common::ErrorBanner;
-use crate::viewer::{HiddenTexture, ViewerDraft};
+use crate::viewer::{AlphaCutoff, HiddenTexture, ViewerDraft};
 use hangar_core::{
     CommitVersionRequest, EDITABLE_SLOTS, MATERIAL_CONFIG_PATH, MaterialConfig, MaterialInfo, PreviewKind,
     PreviewManifest, SkinConfig, TextureOverride, TextureSlot, VersionDto, VersionStatus, blob_url, paths,
@@ -27,6 +28,10 @@ const AUTO: &str = "";
 /// Select value forcing an empty slot. Stored paths are normalised and never
 /// start with `/`, so this cannot collide with a file.
 const NONE: &str = "/none";
+
+/// Tooltip of the alpha cutoff field.
+const CUTOFF_HINT: &str = "Recorte da transparência (0 a 1): o que tiver alfa abaixo do valor some. Use quando o arquivo \
+     do modelo não traz o limite do shader (ex.: Blender com alfa > 0,03). Vazio = automático.";
 
 fn editable_model(v: &VersionDto) -> Option<&PreviewManifest> {
     v.preview
@@ -79,13 +84,20 @@ fn effective(m: &MaterialInfo, cfg: &MaterialConfig, target: Target, slot: Textu
 type HiddenSet = HashSet<(String, TextureSlot)>;
 
 /// What the viewer should show for the edited target: base assignments that
-/// differ from the baked textures, the skin's overrides, and hidden textures.
+/// differ from the baked textures, the skin's overrides, hidden textures and
+/// alpha cutoffs that differ from the baked alpha mode.
 fn compute_draft(p: &PreviewManifest, cfg: &MaterialConfig, target: Target, hidden: &HiddenSet) -> Option<ViewerDraft> {
     let previews: HashMap<&str, &str> =
         p.textures.iter().filter_map(|t| t.preview_hash.as_deref().map(|h| (t.path.as_str(), h))).collect();
     let mut out = Vec::new();
     let mut hidden_out = Vec::new();
+    let mut cutoffs = Vec::new();
     for m in &p.materials {
+        if let Some(cutoff) = cfg.cutoff(&m.name)
+            && !(m.alpha_mode.as_deref() == Some("MASK") && m.alpha_cutoff == Some(cutoff))
+        {
+            cutoffs.push(AlphaCutoff { material: m.name.clone(), cutoff });
+        }
         let is_hidden = |slot: TextureSlot| hidden.contains(&(m.name.clone(), slot));
         let mut slots: BTreeMap<TextureSlot, String> = BTreeMap::new();
         if let Some(a) = cfg.assignments(&m.name) {
@@ -134,8 +146,8 @@ fn compute_draft(p: &PreviewManifest, cfg: &MaterialConfig, target: Target, hidd
             }
         }
     }
-    (target != Target::Base || !out.is_empty() || !hidden_out.is_empty())
-        .then_some(ViewerDraft { overrides: out, hidden: hidden_out })
+    (target != Target::Base || !out.is_empty() || !hidden_out.is_empty() || !cutoffs.is_empty())
+        .then_some(ViewerDraft { overrides: out, hidden: hidden_out, cutoffs })
 }
 
 #[component]
@@ -247,9 +259,25 @@ pub fn MaterialsPanel(
         });
     };
 
+    // Empty (or not a number) = automatic; stored clamped to 0–1.
+    let set_cutoff = move |material: String, value: String| {
+        let value = value.trim().replace(',', ".");
+        edit.update(|cfg| {
+            cfg.alpha_cutoff.retain(|k, _| !k.eq_ignore_ascii_case(&material));
+            if let Ok(v) = value.parse::<f32>()
+                && v.is_finite()
+            {
+                cfg.alpha_cutoff.insert(material, v.clamp(0.0, 1.0));
+            }
+        });
+    };
+
     let reset_material = move |material: String| {
         edit.update(|cfg| match target.get_untracked() {
-            Target::Base => cfg.materials.retain(|k, _| !k.eq_ignore_ascii_case(&material)),
+            Target::Base => {
+                cfg.materials.retain(|k, _| !k.eq_ignore_ascii_case(&material));
+                cfg.alpha_cutoff.retain(|k, _| !k.eq_ignore_ascii_case(&material));
+            }
             Target::Skin(i) => {
                 if let Some(s) = cfg.skins.get_mut(i) {
                     s.materials.retain(|k, _| !k.eq_ignore_ascii_case(&material));
@@ -340,6 +368,7 @@ pub fn MaterialsPanel(
     let cards = move || {
         let p = preview.get()?;
         let cfg = edit.get();
+        let saved = baseline.get().unwrap_or_default();
         let t = target.get();
         let opened = open.get();
         let off = hidden.get();
@@ -372,7 +401,8 @@ pub fn MaterialsPanel(
                     Target::Base => BTreeMap::new(),
                 };
                 let effective = |slot: TextureSlot| effective(m, &cfg, t, slot);
-                let edits = if t == Target::Base { base.len() } else { skin.len() };
+                let cutoff = cfg.cutoff(&m.name);
+                let edits = if t == Target::Base { base.len() + usize::from(cutoff.is_some()) } else { skin.len() };
                 let hidden_count =
                     off.iter().filter(|(mat, slot)| *mat == m.name && effective(*slot).is_some()).count();
                 let is_open = opened.contains(&name);
@@ -454,6 +484,35 @@ pub fn MaterialsPanel(
                         })
                         .collect_view()
                 });
+                // The manifest's mode includes a saved manual cutoff: only name it when there was none.
+                let auto_alpha = match (saved.cutoff(&m.name), m.alpha_mode.as_deref()) {
+                    (None, Some("OPAQUE")) => "Automático · opaco".to_string(),
+                    (None, Some("BLEND")) => "Automático · translúcido".to_string(),
+                    (None, Some("MASK")) => format!("Automático · recorte {}", m.alpha_cutoff.unwrap_or(0.5)),
+                    _ => "Automático".to_string(),
+                };
+                let cutoff_name = name.clone();
+                let cutoff_row = (is_open && t == Target::Base).then(|| view! {
+                    <div
+                        class="mat-slot-row mat-alpha-row"
+                        class:edited=cutoff.is_some()
+                        title=CUTOFF_HINT
+                    >
+                        <span></span>
+                        <span class="slot-name">"Recorte alfa"</span>
+                        <span></span>
+                        <input
+                            type="number"
+                            min="0"
+                            max="1"
+                            step="0.01"
+                            placeholder=auto_alpha
+                            prop:value=cutoff.map(|c| c.to_string()).unwrap_or_default()
+                            disabled=!writable
+                            on:change=move |ev| set_cutoff(cutoff_name.clone(), event_target_value(&ev))
+                        />
+                    </div>
+                });
                 let toggle_name = name.clone();
                 let reset_name = name.clone();
                 view! {
@@ -479,6 +538,7 @@ pub fn MaterialsPanel(
                             </span>
                         </button>
                         {rows}
+                        {cutoff_row}
                         {(is_open && edits > 0 && writable).then(|| view! {
                             <button class="link-btn mat-reset" on:click=move |_| reset_material(reset_name.clone())>
                                 {if t == Target::Base { "Restaurar automático" } else { "Remover desta skin" }}

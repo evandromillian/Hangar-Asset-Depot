@@ -112,6 +112,7 @@ pub struct Material {
     pub roughness: f32,
     pub emissive: [f32; 3],
     pub double_sided: bool,
+    pub alpha: AlphaMode,
     pub textures: Vec<TexRef>,
 }
 
@@ -124,9 +125,25 @@ impl Material {
             roughness: 0.8,
             emissive: [0.0; 3],
             double_sided: false,
+            alpha: AlphaMode::Auto,
             textures: vec![],
         }
     }
+}
+
+/// How the source file says the material's alpha is used.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum AlphaMode {
+    /// The file doesn't say (OBJ, textures matched by name): an alpha channel in
+    /// the base color texture is taken as a cutout.
+    #[default]
+    Auto,
+    /// The base color texture's alpha channel is not opacity (e.g. a specular mask
+    /// the material doesn't wire to it): only `base_color[3]` counts.
+    IgnoreTexture,
+    /// Cutout at this threshold.
+    Mask(f32),
+    Blend,
 }
 
 /// A texture reference as found in the source file.

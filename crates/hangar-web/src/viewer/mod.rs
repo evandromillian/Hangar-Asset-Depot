@@ -28,9 +28,9 @@ pub enum ViewerCommand {
     LoadModel { key: String, asset: String, bytes: Arc<Vec<u8>>, animations: Vec<ClipInfo> },
     /// Remove the model.
     Clear,
-    /// Override textures by material name (a skin / texture variant), and hide
-    /// some textures entirely (preview toggles of the materials panel).
-    ApplyVariant { textures: Vec<VariantTexture>, hidden: Vec<HiddenTexture> },
+    /// Override textures by material name (a skin / texture variant), hide some
+    /// textures entirely and preview alpha cutoffs (materials panel).
+    ApplyVariant { textures: Vec<VariantTexture>, hidden: Vec<HiddenTexture>, cutoffs: Vec<AlphaCutoff> },
     /// Restore the textures baked into the GLB.
     ResetVariant,
     SetWireframe(bool),
@@ -76,11 +76,19 @@ pub struct HiddenTexture {
     pub roughness: f32,
 }
 
+/// An unsaved alpha cutoff: the material is shown as a cutout at `cutoff`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AlphaCutoff {
+    pub material: String,
+    pub cutoff: f32,
+}
+
 /// Unsaved state of the materials panel, previewed instead of the selected skin.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ViewerDraft {
     pub overrides: Vec<hangar_core::TextureOverride>,
     pub hidden: Vec<HiddenTexture>,
+    pub cutoffs: Vec<AlphaCutoff>,
 }
 
 /// Bevy → Leptos.

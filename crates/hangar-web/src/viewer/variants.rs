@@ -2,7 +2,7 @@
 //! StandardMaterials by material name, mirroring what the pipeline bakes.
 
 use super::model::ModelState;
-use super::{HiddenTexture, ViewerCommand, ViewerEvent};
+use super::{AlphaCutoff, HiddenTexture, ViewerCommand, ViewerEvent};
 use bevy::asset::RenderAssetUsages;
 use bevy::gltf::GltfMaterialName;
 use bevy::image::{CompressedImageFormats, ImageSampler, ImageType};
@@ -25,6 +25,7 @@ struct OriginalMaterial {
     emissive_texture: Option<Handle<Image>>,
     specular_tint: Color,
     specular: Option<Handle<Image>>,
+    alpha_mode: AlphaMode,
 }
 
 impl OriginalMaterial {
@@ -41,6 +42,7 @@ impl OriginalMaterial {
             emissive_texture: m.emissive_texture.clone(),
             specular_tint: m.specular_tint,
             specular: m.specular_tint_texture.clone(),
+            alpha_mode: m.alpha_mode,
         }
     }
 
@@ -56,6 +58,7 @@ impl OriginalMaterial {
         m.emissive_texture = self.emissive_texture.clone();
         m.specular_tint = self.specular_tint;
         m.specular_tint_texture = self.specular.clone();
+        m.alpha_mode = self.alpha_mode;
     }
 }
 
@@ -69,6 +72,8 @@ pub struct VariantState {
     active: Vec<(String, TextureSlot, Handle<Image>)>,
     /// Textures switched off by the materials panel.
     hidden: Vec<HiddenTexture>,
+    /// Unsaved alpha cutoffs of the materials panel.
+    cutoffs: Vec<AlphaCutoff>,
     originals: HashMap<AssetId<StandardMaterial>, OriginalMaterial>,
     /// Metal/rough maps packed from separate roughness / metallic overrides,
     /// kept alive while applied.
@@ -86,7 +91,7 @@ pub fn handle_variant_commands(
 ) {
     for cmd in reader.read() {
         match cmd {
-            ViewerCommand::ApplyVariant { textures, hidden } => {
+            ViewerCommand::ApplyVariant { textures, hidden, cutoffs } => {
                 let mut active = Vec::new();
                 for t in textures {
                     let ext = if t.ext.is_empty() { "png" } else { t.ext.as_str() };
@@ -109,11 +114,13 @@ pub fn handle_variant_commands(
                 }
                 state.active = active;
                 state.hidden = hidden.clone();
+                state.cutoffs = cutoffs.clone();
                 state.dirty = true;
             }
             ViewerCommand::ResetVariant => {
                 state.active.clear();
                 state.hidden.clear();
+                state.cutoffs.clear();
                 state.dirty = true;
             }
             _ => {}
@@ -225,6 +232,11 @@ pub fn apply_pending_variant(
             material.specular_tint = SPECULAR_TINT;
         }
         hide_textures(&mut material, |slot| hidden(slot).cloned());
+        // Like the pipeline's MASK export of a manual cutoff. A texture whose alpha the
+        // GLB dropped (BLEND of a non-opacity alpha) only cuts out once saved.
+        if let Some(c) = state.cutoffs.iter().find(|c| c.material.eq_ignore_ascii_case(&name.0)) {
+            material.alpha_mode = AlphaMode::Mask(c.cutoff);
+        }
     }
     state.dirty = false;
     state.applied_generation = Some(model.generation);

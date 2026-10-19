@@ -184,13 +184,13 @@ pub fn ViewerPanel(
                 .get()
                 .and_then(|n| p.variants.into_iter().find(|v| v.name == n))
                 .filter(|v| !v.is_default && !v.overrides.is_empty())
-                .map(|v| ViewerDraft { overrides: v.overrides, hidden: vec![] }),
+                .map(|v| ViewerDraft { overrides: v.overrides, hidden: vec![], cutoffs: vec![] }),
         };
         // Downloads finish out of order; only the latest request may apply.
         let seq = variant_seq.get_value() + 1;
         variant_seq.set_value(seq);
-        match wanted.filter(|d| !d.overrides.is_empty() || !d.hidden.is_empty()) {
-            Some(ViewerDraft { overrides, hidden }) => {
+        match wanted.filter(|d| !d.overrides.is_empty() || !d.hidden.is_empty() || !d.cutoffs.is_empty()) {
+            Some(ViewerDraft { overrides, hidden, cutoffs }) => {
                 spawn_local(async move {
                     let mut textures = Vec::new();
                     for o in overrides {
@@ -205,7 +205,7 @@ pub fn ViewerPanel(
                         }
                     }
                     if variant_seq.get_value() == seq {
-                        cmd_tx.send(ViewerCommand::ApplyVariant { textures, hidden }).ok();
+                        cmd_tx.send(ViewerCommand::ApplyVariant { textures, hidden, cutoffs }).ok();
                     }
                 });
             }

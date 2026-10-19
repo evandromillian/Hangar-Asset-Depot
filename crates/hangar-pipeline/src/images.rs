@@ -183,12 +183,24 @@ pub fn pack_metal_rough(rough: Option<&RgbaImage>, metal: Option<&RgbaImage>, ro
     out
 }
 
-/// Put an opacity map into the alpha channel of a base colour map.
-pub fn merge_alpha(base: &RgbaImage, opacity: &RgbaImage) -> RgbaImage {
-    let op = fit_exact(opacity, base.width(), base.height());
+/// Copy with a fully opaque alpha channel.
+pub fn without_alpha(img: &RgbaImage) -> RgbaImage {
+    let mut out = img.clone();
+    for p in out.pixels_mut() {
+        p.0[3] = 255;
+    }
+    out
+}
+
+/// Put an opacity map into the alpha channel of a base colour map. The map's own
+/// alpha channel is the opacity when it has one (a colour texture whose alpha is a
+/// cutout, e.g. the base colour itself); a grayscale map gives its red channel.
+pub fn merge_alpha(base: &RgbaImage, opacity: &Decoded) -> RgbaImage {
+    let channel = if opacity.has_alpha { 3 } else { 0 };
+    let op = fit_exact(&opacity.image, base.width(), base.height());
     let mut out = base.clone();
     for (o, a) in out.pixels_mut().zip(op.pixels()) {
-        o.0[3] = a.0[0];
+        o.0[3] = a.0[channel];
     }
     out
 }
@@ -242,6 +254,19 @@ mod tests {
         let r = RgbaImage::from_pixel(2, 2, image::Rgba([100, 100, 100, 255]));
         let p = pack_metal_rough(Some(&r), None, 0.5, 1.0);
         assert_eq!(p.get_pixel(0, 0).0, [255, 100, 255, 255]);
+    }
+
+    #[test]
+    fn opacity_channel() {
+        let base = RgbaImage::from_pixel(2, 2, image::Rgba([1, 2, 3, 255]));
+        let decoded = |px: [u8; 4]| {
+            let d = decode_bytes(&encode_png(&RgbaImage::from_pixel(2, 2, image::Rgba(px))), Some("o.png"), 16);
+            d.unwrap()
+        };
+        // Grayscale map (opaque alpha): red channel.
+        assert_eq!(merge_alpha(&base, &decoded([90, 90, 90, 255])).get_pixel(0, 0).0, [1, 2, 3, 90]);
+        // Colour texture with a cutout in alpha: the alpha channel, not its colour.
+        assert_eq!(merge_alpha(&base, &decoded([200, 150, 100, 40])).get_pixel(0, 0).0, [1, 2, 3, 40]);
     }
 
     #[test]
