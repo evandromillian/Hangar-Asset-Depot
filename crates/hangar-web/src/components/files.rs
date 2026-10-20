@@ -3,7 +3,7 @@
 use crate::api;
 use crate::components::common::ErrorBanner;
 use crate::util::{fmt_bytes, short_hash};
-use hangar_core::{VersionDiff, VersionDto, paths};
+use hangar_core::{PreviewManifest, VersionDiff, VersionDto, paths};
 use leptos::prelude::*;
 use std::collections::HashMap;
 use uuid::Uuid;
@@ -192,10 +192,60 @@ pub fn FilesPanel(
                                 })
                                 .collect_view()}
                         </ul>
+                        {(!only).then(|| version.get().and_then(|v| v.preview).map(|p| view! { <SetFiles manifest=p /> }))}
                     }
                         .into_any()
                 }
             }}
         </div>
     }
+}
+
+/// The images of linked texture sets that the materials use: they live in the
+/// set's version, so they are downloaded from there.
+#[component]
+fn SetFiles(manifest: PreviewManifest) -> impl IntoView {
+    let used = manifest.texture_set_files();
+    manifest
+        .texture_sets
+        .iter()
+        .filter_map(|s| {
+            let set_version = s.version_id?;
+            let prefix = format!("{}/", s.prefix);
+            let rows = used
+                .iter()
+                .filter_map(|path| {
+                    let rest = path.strip_prefix(&prefix)?;
+                    let size = manifest.textures.iter().find(|t| &t.path == path).map(|t| t.size);
+                    let dir = paths::parent(rest).to_string();
+                    let name = paths::file_name(rest).to_string();
+                    Some(view! {
+                        <li class="file-row row-set">
+                            <span class="file-mark mono" title="Do conjunto de texturas">"↗"</span>
+                            <span class="file-path" title=path.clone()>
+                                {(!dir.is_empty()).then(|| view! { <span class="file-dir">{format!("{dir}/")}</span> })}
+                                <span class="file-name">{name}</span>
+                            </span>
+                            <span class="file-size mono muted">{size.map(|s| fmt_bytes(s as i64))}</span>
+                            <span class="file-hash"></span>
+                            <a class="icon-btn" title="Baixar" href=api::raw_file_url(set_version, rest, true)>"⇩"</a>
+                        </li>
+                    })
+                })
+                .collect::<Vec<_>>();
+            (!rows.is_empty()).then(|| {
+                let version = s.version_number.map(|n| format!(" · v{n}")).unwrap_or_default();
+                view! {
+                    <div class="set-files">
+                        <p class="set-files-head">
+                            "Do conjunto de texturas "
+                            <a href=format!("/a/{}", s.asset_id)>{s.name.clone()}</a>
+                            <span class="muted">{version}</span>
+                        </p>
+                        <ul class="file-list">{rows}</ul>
+                    </div>
+                }
+            })
+        })
+        .collect_view()
 }

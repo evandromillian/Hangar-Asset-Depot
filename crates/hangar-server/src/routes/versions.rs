@@ -311,6 +311,37 @@ async fn raw_file(
     Ok((headers, Body::from_stream(stream)).into_response())
 }
 
+/// The texture-set images the version's materials use (`@slug/…` paths, stored
+/// in the set's version), so a download carries every texture of the model.
+/// Sets the user can no longer read are left out.
+async fn texture_set_entries(
+    db: &DatabaseConnection,
+    user: &CurrentUser,
+    v: &asset_versions::Model,
+) -> Result<Vec<FileEntry>> {
+    let Some(manifest) = v.preview_manifest() else { return Ok(vec![]) };
+    let mut readable: BTreeMap<Uuid, bool> = BTreeMap::new();
+    let mut out = Vec::new();
+    for path in manifest.texture_set_files() {
+        let (set_version, rest) = manifest.file_location(v.id, &path);
+        let ok = match readable.get(&set_version) {
+            Some(ok) => *ok,
+            None => {
+                let ok = access::version(db, user, set_version, Need::Read).await.is_ok();
+                *readable.entry(set_version).or_insert(ok)
+            }
+        };
+        if !ok {
+            continue;
+        }
+        let file = version_files::Entity::find_by_id((set_version, rest)).one(db).await.ctx("load set file")?;
+        if let Some(f) = file {
+            out.push(FileEntry { path, ..f.to_entry() });
+        }
+    }
+    Ok(out)
+}
+
 #[get("/api/versions/{id}/archive")]
 async fn archive(
     user: CurrentUser,
@@ -319,7 +350,8 @@ async fn archive(
     Path(id): Path<Uuid>,
 ) -> Result<Response> {
     let (v, a, _) = access::version(&db, &user, id, Need::Read).await?;
-    let tree = load_tree(&db, v.id).await?;
+    let mut tree = load_tree(&db, v.id).await?;
+    tree.extend(texture_set_entries(&db, &user, &v).await?);
     let file = crate::archive::build_zip(&store, &tree).await?;
     let len = file.metadata().await.ctx("zip size")?.len();
     let mut headers = HeaderMap::new();

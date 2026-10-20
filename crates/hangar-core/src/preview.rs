@@ -208,6 +208,22 @@ impl PreviewManifest {
         texture_location(&self.texture_sets, own_version, path)
     }
 
+    /// The texture-set images (`@slug/…` paths) that the materials and variants
+    /// use, sorted: the files the version needs besides its own.
+    pub fn texture_set_files(&self) -> Vec<String> {
+        let in_set = |p: &str| {
+            self.texture_sets.iter().any(|s| {
+                s.version_id.is_some() && p.strip_prefix(s.prefix.as_str()).is_some_and(|r| r.starts_with('/'))
+            })
+        };
+        let used = self.materials.iter().flat_map(|m| m.textures.iter().filter_map(|t| t.path.as_deref()));
+        let overrides = self.variants.iter().flat_map(|v| v.overrides.iter().map(|o| o.path.as_str()));
+        let mut out: Vec<String> = used.chain(overrides).filter(|p| in_set(p)).map(str::to_string).collect();
+        out.sort();
+        out.dedup();
+        out
+    }
+
     /// An animation version seen on one of its skeletons, shaped like a model
     /// manifest (a single LOD, the skeleton's clips) so the 3D viewer can show it.
     pub fn on_skeleton(&self, slug: &str) -> Option<PreviewManifest> {
@@ -285,5 +301,43 @@ mod tests {
         assert_eq!(m.file_location(own, "@city/walls/bh2b.jpg"), (set_version, "walls/bh2b.jpg".to_string()));
         assert_eq!(m.file_location(own, "@cityscape/a.png"), (own, "@cityscape/a.png".to_string()));
         assert_eq!(m.file_location(own, "Textures/a.png"), (own, "Textures/a.png".to_string()));
+    }
+
+    #[test]
+    fn texture_set_files_are_the_used_ones() {
+        let tex = |path: &str| MaterialTexture {
+            slot: TextureSlot::BaseColor,
+            path: Some(path.into()),
+            original: None,
+            resolved_by: "texture-set".into(),
+        };
+        let m = PreviewManifest {
+            texture_sets: vec![
+                TextureSetUse { prefix: "@city".into(), version_id: Some(Uuid::from_u128(2)), ..Default::default() },
+                TextureSetUse { prefix: "@broken".into(), error: Some("x".into()), ..Default::default() },
+            ],
+            materials: vec![MaterialInfo {
+                name: "wall".into(),
+                base_color: [1.0; 4],
+                metallic: 0.0,
+                roughness: 1.0,
+                textures: vec![tex("@city/b.jpg"), tex("own/a.png"), tex("@broken/c.jpg"), tex("@city/a.jpg")],
+                alpha_mode: None,
+                alpha_cutoff: None,
+            }],
+            variants: vec![VariantInfo {
+                name: "night".into(),
+                is_default: false,
+                overrides: vec![TextureOverride {
+                    material: "wall".into(),
+                    slot: TextureSlot::BaseColor,
+                    path: "@city/b.jpg".into(),
+                    preview_hash: String::new(),
+                }],
+                detected_by: "manual".into(),
+            }],
+            ..Default::default()
+        };
+        assert_eq!(m.texture_set_files(), ["@city/a.jpg", "@city/b.jpg"]);
     }
 }

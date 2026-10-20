@@ -161,6 +161,9 @@ prepared statements. Add `?sslmode=require`.
   records them in config order. A new head of an asset re-queues the head versions whose
   manifest lists it (`jobs::requeue_texture_set_users`, on commit and on head change);
   `hangar_core::texture_location` maps `@slug/…` paths to the set's version for downloads.
+  `PreviewManifest::texture_set_files` = the set images the materials/variants use: the
+  Arquivos tab lists them (downloaded from the set's version) and the version zip adds them
+  under `@slug/` (skipped when the user can no longer read the set).
 - Recoverable problems go to `manifest.warnings`, not errors. Fail only when nothing can be previewed.
 - Heuristics (texture resolution, slot tokens, variant detection, LOD suffixes) are unit-tested in
   their modules; extend those tests when changing them.
