@@ -38,6 +38,8 @@ pub enum ViewerCommand {
     SetGrid(bool),
     /// Frame the model again.
     ResetCamera,
+    /// Turn the camera (animated) to look from a world direction, e.g. `Vec3::X` (axis gizmo).
+    ViewFrom(Vec3),
     /// Play clip `n` (looping), or show the rest pose with `None`.
     SelectAnimation(Option<usize>),
     SetAnimationPaused(bool),
@@ -100,6 +102,15 @@ pub enum ViewerEvent {
     Error(String),
 }
 
+/// Bevy → Leptos: the orbit camera's angles, sent whenever they change (every frame while
+/// orbiting). It has a channel of its own because the Leptos side of a channel only sees the
+/// last message of each frame, and these would hide the `ViewerEvent`s sent in the same frame.
+#[derive(Message, Clone, Copy, Debug, PartialEq)]
+pub struct ViewAngles {
+    pub yaw: f32,
+    pub pitch: f32,
+}
+
 /// In-memory directory backing the `mem://` asset source.
 #[derive(Resource, Clone)]
 pub struct MemDir(pub Dir);
@@ -124,6 +135,7 @@ pub const CANVAS_ID: &str = "hangar_viewer";
 pub fn build_app(
     commands_rx: BevyMessageReceiver<ViewerCommand>,
     events_tx: BevyMessageSender<ViewerEvent>,
+    view_tx: BevyMessageSender<ViewAngles>,
 ) -> App {
     let dir = Dir::default();
     let reader_dir = dir.clone();
@@ -166,6 +178,7 @@ pub fn build_app(
     .init_resource::<animation::AnimState>()
     .import_message_from_leptos(commands_rx)
     .export_message_to_leptos(events_tx)
+    .export_message_to_leptos(view_tx)
     .add_systems(Startup, setup_scene)
     .add_observer(model::on_instance_ready)
     .add_systems(
@@ -177,6 +190,7 @@ pub fn build_app(
             model::watch_load_failures,
             camera::orbit_input,
             camera::apply_orbit,
+            camera::report_view,
             draw_grid,
         )
             .chain(),

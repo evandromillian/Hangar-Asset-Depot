@@ -351,6 +351,31 @@ select { appearance: none; background-image: linear-gradient(45deg, transparent 
   position: absolute; right: 10px; bottom: 8px; font-size: 10.5px; color: rgba(164, 172, 181, 0.6);
   pointer-events: none; text-shadow: 0 1px 2px #000;
 }
+/* Axis gizmo (Blender colours): positive ends filled with their letter, negative ends as rings. */
+.axis-gizmo {
+  position: absolute; top: 10px; right: 10px; width: 96px; height: 96px; border-radius: 50%;
+  transition: background 0.15s; isolation: isolate; /* keeps the dots' z-index inside the gizmo */
+}
+.axis-gizmo:hover { background: rgba(255, 255, 255, 0.06); }
+.axis-gizmo svg { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; pointer-events: none; }
+.axis-gizmo line { stroke-width: 2.5; stroke-linecap: round; }
+.axis-gizmo line.axis-x { stroke: #ff3352; }
+.axis-gizmo line.axis-y { stroke: #8bdc00; }
+.axis-gizmo line.axis-z { stroke: #2890ff; }
+.axis-dot {
+  --c: #fff; position: absolute; left: 39px; top: 39px; width: 18px; height: 18px; padding: 0;
+  border: 0; border-radius: 50%; background: var(--c); color: #0d0f11; cursor: pointer;
+  display: grid; place-items: center; font: 700 10.5px var(--font-mono); line-height: 1;
+}
+.axis-dot.axis-x { --c: #ff3352; }
+.axis-dot.axis-y { --c: #8bdc00; }
+.axis-dot.axis-z { --c: #2890ff; }
+.axis-dot.neg { background: color-mix(in srgb, var(--c) 28%, #131518); box-shadow: inset 0 0 0 1.5px var(--c); }
+.axis-dot.neg span { display: none; }
+.axis-dot.neg:hover span, .axis-dot.neg:focus-visible span { display: inline; color: var(--text); font-size: 8.5px; }
+.axis-dot:hover { box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.85); }
+.axis-dot.neg:hover { box-shadow: inset 0 0 0 1.5px var(--c), 0 0 0 2px rgba(255, 255, 255, 0.85); }
+.axis-dot:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .viewer-toolbar {
   display: flex; align-items: center; gap: 14px; flex-wrap: wrap; padding: 9px 12px;
   border-top: 1px solid var(--line); background: var(--bg-2);

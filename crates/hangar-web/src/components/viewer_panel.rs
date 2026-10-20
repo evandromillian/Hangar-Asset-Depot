@@ -2,8 +2,9 @@
 
 use crate::api;
 use crate::util::{fmt_bytes, fmt_compact, fmt_int};
-use crate::viewer::{self, CANVAS_ID, ClipInfo, VariantTexture, ViewerCommand, ViewerDraft, ViewerEvent};
+use crate::viewer::{self, CANVAS_ID, ClipInfo, VariantTexture, ViewAngles, ViewerCommand, ViewerDraft, ViewerEvent};
 use crate::components::animation::by_folder;
+use crate::components::axis_gizmo::AxisGizmo;
 use hangar_core::{AnimationInfo, LodSource, PreviewKind, VersionDto};
 use leptos::prelude::*;
 use leptos::task::spawn_local;
@@ -71,6 +72,7 @@ pub fn ViewerPanel(
 ) -> impl IntoView {
     let (cmd_tx, cmd_rx) = message_l2b::<ViewerCommand>();
     let (evt_rx, evt_tx) = message_b2l::<ViewerEvent>();
+    let (view_rx, view_tx) = message_b2l::<ViewAngles>();
 
     let cache = StoredValue::new(BlobCache::default());
     let lod = RwSignal::new(0u32);
@@ -284,8 +286,17 @@ pub fn ViewerPanel(
         <div class="viewer">
             <div class="viewer-canvas" on:contextmenu=|ev| ev.prevent_default()>
                 <BevyCanvas
-                    init=move || viewer::build_app(cmd_rx, evt_tx)
+                    init=move || viewer::build_app(cmd_rx, evt_tx, view_tx)
                     canvas_id=CANVAS_ID
+                />
+                <AxisGizmo
+                    view=Signal::derive(move || view_rx.get())
+                    on_pick={
+                        let tx = cmd_tx.clone();
+                        move |dir| {
+                            tx.send(ViewerCommand::ViewFrom(dir)).ok();
+                        }
+                    }
                 />
                 <Show when=move || loading.get()>
                     <div class="viewer-overlay">

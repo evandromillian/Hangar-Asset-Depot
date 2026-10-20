@@ -94,6 +94,7 @@ pub fn handle_commands(
             ViewerCommand::SetWireframe(on) => settings.wireframe = *on,
             ViewerCommand::SetAutoRotate(on) => settings.auto_rotate = *on,
             ViewerCommand::SetGrid(on) => settings.grid = *on,
+            ViewerCommand::ViewFrom(dir) => orbit.view_from(*dir),
             ViewerCommand::ResetCamera => {
                 if let Some((min, max)) = state.bounds {
                     let fov = match projection.single() {

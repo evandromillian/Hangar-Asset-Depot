@@ -1,5 +1,6 @@
 pub mod animation;
 pub mod asset_form;
+pub mod axis_gizmo;
 pub mod common;
 pub mod details;
 pub mod files;
