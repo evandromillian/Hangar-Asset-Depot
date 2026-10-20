@@ -2,7 +2,8 @@
 
 use crate::api;
 use crate::pages::{
-    asset::AssetPage, library::LibraryPage, login::LoginPage, projects::ProjectsPage, skeletons::SkeletonsPage,
+    asset::AssetPage, devices::DevicesPage, library::LibraryPage, login::LoginPage, projects::ProjectsPage,
+    skeletons::SkeletonsPage,
 };
 use hangar_core::UserDto;
 use leptos::prelude::*;
@@ -45,20 +46,32 @@ pub fn App() -> impl IntoView {
                     <Route path=path!("/p/:pid") view=|| view! { <RequireAuth><LibraryPage /></RequireAuth> } />
                     <Route path=path!("/a/:aid") view=|| view! { <RequireAuth><AssetPage /></RequireAuth> } />
                     <Route path=path!("/admin/skeletons") view=|| view! { <RequireAuth><SkeletonsPage /></RequireAuth> } />
+                    <Route path=path!("/dispositivos") view=|| view! { <RequireAuth><DevicesPage /></RequireAuth> } />
                 </Routes>
             </main>
         </Router>
     }
 }
 
-/// Renders children only for authenticated users; otherwise goes to /login.
+/// Renders children only for authenticated users; otherwise goes to /login,
+/// which comes back here afterwards.
 #[component]
 fn RequireAuth(children: ChildrenFn) -> impl IntoView {
     let session = use_session();
     let navigate = use_navigate();
     Effect::new(move |_| {
         if session.checked.get() && session.user.get().is_none() {
-            navigate("/login", Default::default());
+            let here = web_sys::window()
+                .map(|w| {
+                    let loc = w.location();
+                    format!("{}{}", loc.pathname().unwrap_or_default(), loc.search().unwrap_or_default())
+                })
+                .unwrap_or_default();
+            let login = match here.as_str() {
+                "" | "/" => "/login".to_string(),
+                _ => format!("/login?volta={}", api::encode(&here)),
+            };
+            navigate(&login, Default::default());
         }
     });
     move || {
@@ -103,6 +116,7 @@ fn TopBar() -> impl IntoView {
                             .collect::<String>()
                             .to_uppercase();
                         view! {
+                            <A href="/dispositivos" attr:class="topbar-link">"Dispositivos"</A>
                             {u.is_admin.then(|| view! { <A href="/admin/skeletons" attr:class="topbar-link">"Esqueletos"</A> })}
                             <div class="userbox">
                                 <span class="avatar" title=u.username.clone()>{initials}</span>

@@ -322,3 +322,37 @@ pub async fn put_blob(hash: &str, body: &web_sys::Blob) -> ApiResult<BlobUploade
 pub async fn blob_bytes(hash: &str) -> ApiResult<Vec<u8>> {
     get_bytes(&blob_url(hash)).await
 }
+
+// ---------------------------------------------------------- devices / bridge
+
+pub async fn api_tokens() -> ApiResult<Vec<ApiTokenDto>> {
+    get_json("/api/tokens").await
+}
+
+pub async fn delete_api_token(id: Uuid) -> ApiResult<()> {
+    let url = format!("/api/tokens/{id}");
+    no_content(Request::delete(&url), &url).await
+}
+
+pub async fn pairing(code: &str) -> ApiResult<PairInfo> {
+    get_json(&format!("/api/devices/pair/{}", encode(code))).await
+}
+
+pub async fn decide_pairing(code: &str, approve: bool) -> ApiResult<()> {
+    let url = format!("/api/devices/pair/{}", encode(code));
+    let req = Request::post(&url).json(&PairDecision { approve }).map_err(net_err)?;
+    send_req(req, &url).await.map(|_| ())
+}
+
+pub async fn bridge_clients() -> ApiResult<Vec<BridgeClientDto>> {
+    get_json("/api/bridge/clients").await
+}
+
+pub async fn bridge_send(client_id: Uuid, version_id: Uuid) -> ApiResult<DeliveryDto> {
+    let url = "/api/bridge/send";
+    body_json(Request::post(url), url, &BridgeSendRequest { client_id, version_id }).await
+}
+
+pub async fn bridge_delivery(id: Uuid) -> ApiResult<DeliveryDto> {
+    get_json(&format!("/api/bridge/deliveries/{id}")).await
+}

@@ -5,6 +5,7 @@
 
 pub mod animation;
 pub mod api;
+pub mod bridge;
 pub mod enums;
 pub mod materials;
 pub mod paths;
@@ -12,6 +13,7 @@ pub mod preview;
 
 pub use animation::*;
 pub use api::*;
+pub use bridge::*;
 pub use enums::*;
 pub use materials::*;
 pub use preview::*;

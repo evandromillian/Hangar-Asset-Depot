@@ -6,6 +6,7 @@ pub mod files;
 pub mod materials;
 pub mod members;
 pub mod new_version;
+pub mod send_to_editor;
 pub mod stage;
 pub mod tags;
 pub mod texture_viewer;

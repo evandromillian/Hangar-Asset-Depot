@@ -244,6 +244,9 @@ version_files(version_id, path, blob_hash, size)          -- a árvore
 renditions(version_id, kind, key, blob_hash, meta)         -- LOD GLBs, thumbs, previews
 jobs(id, kind, payload, status, attempts, max_attempts, run_after, locked_at, last_error)
 skeletons(id, slug, name, description, asset_id, created_by, created_at)  -- esqueletos de referência
+api_tokens(id, user_id, name, client, token_hash, created_at, last_used_at)  -- tokens dos plugins
+device_pairings(id, device_code_hash, user_code, client, device_name, detail,
+                created_at, expires_at, status, approved_by)  -- pareamentos pendentes
 ```
 
 As migrations são SQL puro embutido no binário (`crates/hangar-server/migrations`),
@@ -258,10 +261,39 @@ aplicadas no boot com controle em `schema_migrations`.
 * Blobs são endereçados por hash de 256 bits; o download exige login e o hash funciona como
   capability (não é enumerável). Arquivos por caminho (`/raw/`) e zip verificam o projeto.
 
+## Plugins de editor ("Enviar para Unreal")
+
+O plugin do Unreal (`tools/unreal/Hangar`) não escuta porta nenhuma: ele mantém aberta uma
+conexão de saída com o servidor (`GET /api/bridge/events`, server-sent events) e o servidor
+repassa a ele o que a web manda. Funciona igual com o Hangar na nuvem, atrás de NAT e de
+firewall, e a página sabe quais editores estão online. (A alternativa — a página falar com
+`localhost` como faz o Meshy — esbarra no prompt de Local Network Access do Chrome e só
+funciona com o navegador e o editor na mesma máquina.)
+
+1. **Pareamento** (fluxo de dispositivo, como o OAuth device flow): o plugin chama
+   `POST /api/devices/pair`, abre `/dispositivos?codigo=XXXX-XXXX` no navegador e consulta
+   `POST /api/devices/pair/poll` com o seu `device_code` secreto. O usuário logado confere o
+   código e autoriza; a próxima consulta cria um token `hgr_…` (só o hash BLAKE3 fica no banco)
+   e o devolve uma única vez. A senha nunca passa pelo editor.
+2. **Tokens**: uma camada antes da do sa-token troca `Authorization: Bearer hgr_…` por uma
+   sessão do sa-token do dono do token, guardada em memória e conferida no banco a cada minuto
+   (revogar em `/dispositivos` vale em todas as instâncias em até 1 min; reiniciar o servidor
+   não desconecta os plugins).
+3. **Envio**: "Enviar para Unreal" (página do asset) → `POST /api/bridge/send` → evento
+   `import` no stream do editor escolhido. O plugin baixa `GET /api/versions/{vid}/bundle`
+   (arquivos por hash, imagens de conjuntos incluídas), importa e informa o progresso em
+   `POST /api/bridge/deliveries/{id}`; a página acompanha o envio.
+
+O estado do bridge (editores conectados, envios) fica em memória por processo. Com mais de uma
+instância do servidor, o envio precisa chegar à instância que segura o stream do editor
+(Postgres `LISTEN/NOTIFY` na frente de `BridgeHub::push`); o balanceador deve permitir
+respostas longas (o servidor manda um comentário a cada 15 s).
+
 ## API REST
 
 Autenticação: cookie `hangar_token` (HttpOnly, definido no login) ou
-`Authorization: Bearer <token>`.
+`Authorization: Bearer <token>` — token de sessão ou token de acesso `hgr_…` (plugins; ver
+"Plugins de editor").
 
 | método | rota | corpo → resposta |
 |---|---|---|
@@ -286,7 +318,8 @@ Autenticação: cookie `hangar_token` (HttpOnly, definido no login) ou
 | GET | `/api/versions/{vid}/diff?against=` | `VersionDiff` |
 | POST | `/api/versions/{vid}/reprocess` | `VersionDto` |
 | GET | `/api/versions/{vid}/raw/{*path}` | bytes do arquivo (`?download=1` força anexo) |
-| GET | `/api/versions/{vid}/archive` | zip da árvore |
+| GET | `/api/versions/{vid}/archive` | zip da árvore (+ imagens de conjuntos de texturas usadas, em `@slug/`) |
+| GET | `/api/versions/{vid}/bundle` | `VersionBundle`: versão + arquivos a baixar (os mesmos do zip), por hash |
 | POST | `/api/blobs/missing` | `MissingBlobsRequest` → `MissingBlobsResponse` |
 | PUT | `/api/blobs/{hash}` | corpo cru → `BlobUploaded` |
 | GET | `/api/blobs/{hash}` | bytes (cache imutável) |
@@ -296,5 +329,16 @@ Autenticação: cookie `hangar_token` (HttpOnly, definido no login) ou
 | POST | `/api/skeletons/{id}/reprocess` | admin: reprocessa as heads que usam o esqueleto → `ReprocessQueued` |
 | GET | `/api/jobs?status=` | admin: `Vec<JobDto>` |
 | POST | `/api/admin/gc?grace_hours=24` | admin: apaga blobs não referenciados |
+| GET | `/api/tokens` | `Vec<ApiTokenDto>` do usuário |
+| DELETE | `/api/tokens/{id}` | revoga um token → 204 |
+| DELETE | `/api/tokens/current` | o plugin revoga o próprio token (ao desconectar) → 204 |
+| POST | `/api/devices/pair` | público: `PairStartRequest` → `PairStartResponse` |
+| POST | `/api/devices/pair/poll` | público: `PairPollRequest` → `PairPollResponse` (token uma única vez) |
+| GET | `/api/devices/pair/{code}` | `PairInfo` do pareamento pendente |
+| POST | `/api/devices/pair/{code}` | `PairDecision` → 204 |
+| GET | `/api/bridge/events?app=&name=&detail=` | stream SSE do editor: `hello` (`BridgeHello`), `import` (`BridgeImport`) |
+| GET | `/api/bridge/clients` | `Vec<BridgeClientDto>`: editores do usuário conectados agora |
+| POST | `/api/bridge/send` | `BridgeSendRequest` → `DeliveryDto` |
+| GET/POST | `/api/bridge/deliveries/{id}` | `DeliveryDto` / o editor informa o progresso (`DeliveryUpdate`) |
 
 Erros: status HTTP + corpo texto (`KnownWebError` do summer-web).

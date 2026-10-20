@@ -5,7 +5,9 @@ use crate::entities::{asset_versions, assets, version_files};
 use crate::error::{Ctx, Result, bad_request, not_found};
 use crate::jobs::{JobQueue, KIND_PROCESS_VERSION, ProcessVersionPayload, requeue_texture_set_users};
 use crate::storage::BlobStore;
-use hangar_core::{CommitVersionRequest, DiffQuery, FileEntry, VersionDiff, VersionDto, VersionStatus, paths};
+use hangar_core::{
+    CommitVersionRequest, DiffQuery, FileEntry, VersionBundle, VersionDiff, VersionDto, VersionStatus, paths,
+};
 use sea_orm::{
     ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseConnection, DbBackend, EntityTrait, QueryFilter,
     QueryOrder, QuerySelect, Set, Statement, TransactionTrait,
@@ -210,6 +212,21 @@ async fn list_files(
 ) -> Result<Json<Vec<FileEntry>>> {
     access::version(&db, &user, id, Need::Read).await?;
     Ok(Json(load_tree(&db, id).await?))
+}
+
+/// The version plus every file an editor needs: its own and the texture-set
+/// images its materials use (`@slug/…`, the same entries as the zip).
+#[get("/api/versions/{id}/bundle")]
+async fn bundle(
+    user: CurrentUser,
+    Component(db): Component<DatabaseConnection>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<VersionBundle>> {
+    let (v, a, _) = access::version(&db, &user, id, Need::Read).await?;
+    let mut files = load_tree(&db, v.id).await?;
+    files.extend(texture_set_entries(&db, &user, &v).await?);
+    let version = dto::version_dto_one(&db, v, a.head_version_id).await?;
+    Ok(Json(VersionBundle { version, files }))
 }
 
 #[get("/api/versions/{id}/diff")]

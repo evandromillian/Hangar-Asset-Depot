@@ -23,7 +23,7 @@ changing the data model, the API or the pipeline output.
 | `crates/hangar-cli` | native | `hangar` binary: login, push (folder → new version, uploads only changed blobs), pull, versions, diff, status. |
 
 Other: `config/app.toml` (server config), `crates/hangar-server/migrations/*.sql`,
-`tools/blender/export_glb.py` (headless Blender fallback), `docker-compose.yml` (Postgres, optional MinIO).
+`tools/blender/export_glb.py` (headless Blender fallback), `tools/unreal/Hangar` (UE 5.8 editor plugin: pairing, events stream, import; build with `RunUAT BuildPlugin`, see its README), `docker-compose.yml` (Postgres, optional MinIO).
 
 ## Commands
 
@@ -103,6 +103,14 @@ prepared statements. Add `?sslmode=require`.
   `hangar_pipeline::is_relevant` files to a temp dir, runs the pipeline in `spawn_blocking`, stores
   artifacts with `BlobStore::put_bytes`, records `renditions` (used for GC references) and writes the
   `PreviewManifest` JSON into `asset_versions.preview`. The manifest is what the UI consumes.
+- **Access tokens / editor bridge** (`tokens.rs`, `bridge.rs`, `routes/{tokens,bridge}.rs`): plugins pair
+  through a device flow (`/api/devices/pair*`, approved on the web page `/dispositivos?codigo=…`) and get
+  an `hgr_…` token (BLAKE3 hash in `api_tokens`). `tokens::layer` runs outside sa-token's layer
+  (`HangarPlugin` depends on `SaTokenPlugin` for that order) and swaps the token for a cached sa-token
+  session, rechecked against the DB every minute. Editors hold `GET /api/bridge/events` (SSE, 15 s
+  keep-alive); "Enviar para Unreal" → `POST /api/bridge/send` → `import` event; the editor downloads
+  `GET /api/versions/{id}/bundle` and reports on `/api/bridge/deliveries/{id}`. `BridgeHub` is
+  in-memory per process — several server instances need a fan-out (LISTEN/NOTIFY) first.
 - **Migrations** (`db.rs` + `migrations/`): append-only. Add `NNNN_name.sql` and register it in the
   `MIGRATIONS` array. Never edit a migration that may have been applied. Each runs in a transaction.
 

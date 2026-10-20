@@ -7,7 +7,8 @@
 //!
 //! Covers: first-user setup, projects, assets, deduplicated upload, incremental
 //! versions (inherit + delete), processing (LODs, variants, thumbnail), diff,
-//! downloads and project permissions.
+//! downloads, project permissions and the editor plugin flow (pairing, events
+//! stream, send to editor, token revocation).
 
 use hangar_core::*;
 use reqwest::blocking::{Client, ClientBuilder};
@@ -228,4 +229,90 @@ fn full_workflow() {
     assert_eq!(b.status_of(reqwest::Method::GET, &asset_path, None), 200);
     let commit = json!({"parent_id": v1.id, "message": "x", "deletes": ["tank.mtl"]});
     assert_eq!(b.status_of(reqwest::Method::POST, &format!("{asset_path}/versions"), Some(commit)), 403);
+
+    editor_plugin(&s, &b, &base, v2.id);
+}
+
+/// Pairing an editor, the events stream, "Enviar para Unreal" and revoking.
+fn editor_plugin(s: &S, other: &S, base: &str, version: Uuid) {
+    use std::io::BufRead;
+    // The plugin has no cookies: only its token.
+    let plugin = S { base: base.into(), http: Client::new() };
+    let start: PairStartResponse =
+        plugin.post("/api/devices/pair", json!({"client": "unreal", "device_name": "TEST-PC", "detail": "Teste · UE 5.8.1"}));
+    let poll = json!({"device_code": start.device_code});
+    let pending: PairPollResponse = plugin.post("/api/devices/pair/poll", poll.clone());
+    assert_eq!(pending.status, PairStatus::Pending);
+    assert!(start.verify_path.ends_with(&start.user_code));
+    let info: PairInfo = s.get(&format!("/api/devices/pair/{}", start.user_code.to_lowercase().replace('-', "")));
+    assert_eq!(info.device_name, "TEST-PC");
+    assert_eq!(s.status_of(reqwest::Method::POST, &format!("/api/devices/pair/{}", start.user_code), Some(json!({"approve": true}))), 204);
+    let approved: PairPollResponse = plugin.post("/api/devices/pair/poll", poll.clone());
+    assert_eq!(approved.status, PairStatus::Approved);
+    let token = approved.token.expect("token on approval");
+    let again: PairPollResponse = plugin.post("/api/devices/pair/poll", poll);
+    assert_eq!((again.status, again.token), (PairStatus::Expired, None), "the token is handed out once");
+
+    let auth = format!("Bearer {token}");
+    let me: UserDto = plugin.http.get(plugin.url("/api/auth/me")).header("Authorization", &auth).send().unwrap().json().unwrap();
+    assert_eq!(Some(me.id), approved.user.map(|u| u.id));
+
+    let stream = plugin
+        .http
+        .get(plugin.url("/api/bridge/events?app=unreal&name=TEST-PC&detail=Teste"))
+        .header("Authorization", &auth)
+        .send()
+        .unwrap();
+    assert!(stream.status().is_success());
+    let mut lines = std::io::BufReader::new(stream).lines();
+    let mut next_event = move || -> (String, String) {
+        let (mut event, mut data) = (String::new(), String::new());
+        for line in lines.by_ref() {
+            let line = line.unwrap();
+            if line.is_empty() && !data.is_empty() {
+                return (event, data);
+            }
+            if let Some(e) = line.strip_prefix("event:") {
+                event = e.trim().into();
+            } else if let Some(d) = line.strip_prefix("data:") {
+                data.push_str(d.trim_start());
+            }
+        }
+        panic!("events stream ended");
+    };
+    let (event, data) = next_event();
+    assert_eq!(event, "hello");
+    let hello: BridgeHello = serde_json::from_str(&data).unwrap();
+    let clients: Vec<BridgeClientDto> = s.get("/api/bridge/clients");
+    assert!(clients.iter().any(|c| c.id == hello.client_id && c.name == "TEST-PC"));
+    assert!(other.get::<Vec<BridgeClientDto>>("/api/bridge/clients").is_empty(), "editors are per user");
+
+    let sent: DeliveryDto = s.post("/api/bridge/send", json!({"client_id": hello.client_id, "version_id": version}));
+    assert_eq!(sent.state, DeliveryState::Sent);
+    let (event, data) = next_event();
+    assert_eq!(event, "import");
+    let import: BridgeImport = serde_json::from_str(&data).unwrap();
+    assert_eq!((import.delivery_id, import.version_id), (sent.id, version));
+
+    let bundle: VersionBundle =
+        plugin.http.get(plugin.url(&format!("/api/versions/{version}/bundle"))).header("Authorization", &auth).send().unwrap().json().unwrap();
+    assert!(bundle.files.iter().any(|f| f.path == "tank.obj"));
+    let r = plugin
+        .http
+        .post(plugin.url(&format!("/api/bridge/deliveries/{}", sent.id)))
+        .header("Authorization", &auth)
+        .json(&json!({"state": "done", "imported": ["/Game/Hangar/tank"]}))
+        .send()
+        .unwrap();
+    assert!(r.status().is_success());
+    let done: DeliveryDto = s.get(&format!("/api/bridge/deliveries/{}", sent.id));
+    assert_eq!((done.state, done.imported.len()), (DeliveryState::Done, 1));
+    assert_eq!(other.status_of(reqwest::Method::GET, &format!("/api/bridge/deliveries/{}", sent.id), None), 404);
+
+    let tokens: Vec<ApiTokenDto> = s.get("/api/tokens");
+    let t = tokens.iter().find(|t| t.name.starts_with("Unreal · TEST-PC")).expect("token listed");
+    assert!(t.last_used_at.is_some());
+    assert_eq!(s.status_of(reqwest::Method::DELETE, &format!("/api/tokens/{}", t.id), None), 204);
+    let after = plugin.http.get(plugin.url("/api/auth/me")).header("Authorization", &auth).send().unwrap();
+    assert_eq!(after.status().as_u16(), 401, "revoked token");
 }

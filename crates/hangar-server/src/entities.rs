@@ -219,3 +219,75 @@ pub mod skeletons {
 
     impl ActiveModelBehavior for ActiveModel {}
 }
+
+pub mod api_tokens {
+    use sea_orm::entity::prelude::*;
+
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "api_tokens")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub id: Uuid,
+        pub user_id: Uuid,
+        pub name: String,
+        pub client: String,
+        pub token_hash: String,
+        pub created_at: DateTimeUtc,
+        pub last_used_at: Option<DateTimeUtc>,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+
+    impl Model {
+        pub fn to_dto(&self) -> hangar_core::ApiTokenDto {
+            hangar_core::ApiTokenDto {
+                id: self.id,
+                name: self.name.clone(),
+                client: self.client.clone(),
+                created_at: self.created_at,
+                last_used_at: self.last_used_at,
+            }
+        }
+    }
+}
+
+pub mod device_pairings {
+    use sea_orm::entity::prelude::*;
+
+    #[derive(Clone, Debug, PartialEq, DeriveEntityModel)]
+    #[sea_orm(table_name = "device_pairings")]
+    pub struct Model {
+        #[sea_orm(primary_key, auto_increment = false)]
+        pub id: Uuid,
+        pub device_code_hash: String,
+        pub user_code: String,
+        pub client: String,
+        pub device_name: String,
+        pub detail: Option<String>,
+        pub created_at: DateTimeUtc,
+        pub expires_at: DateTimeUtc,
+        pub status: String,
+        pub approved_by: Option<Uuid>,
+    }
+
+    #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
+    pub enum Relation {}
+
+    impl ActiveModelBehavior for ActiveModel {}
+
+    impl Model {
+        pub fn to_info(&self) -> hangar_core::PairInfo {
+            hangar_core::PairInfo {
+                user_code: self.user_code.clone(),
+                client: self.client.clone(),
+                device_name: self.device_name.clone(),
+                detail: self.detail.clone(),
+                created_at: self.created_at,
+                expires_at: self.expires_at,
+            }
+        }
+    }
+}

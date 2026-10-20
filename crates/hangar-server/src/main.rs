@@ -3,6 +3,7 @@
 mod access;
 mod archive;
 mod auth;
+mod bridge;
 mod config;
 mod db;
 mod dto;
@@ -11,6 +12,7 @@ mod error;
 mod jobs;
 mod routes;
 mod storage;
+mod tokens;
 
 use config::HangarConfig;
 use jobs::{JobQueue, WorkerCtx};
@@ -22,10 +24,12 @@ use summer::{App, async_trait, auto_config};
 use summer_opendal::{OpenDALPlugin, Op};
 use summer_sa_token::{PathAuthBuilder, SaTokenAuthConfigurator, SaTokenPlugin};
 use summer_sea_orm::{DbConn, SeaOrmPlugin};
-use summer_web::{WebConfigurator, WebPlugin};
+use summer_web::{LayerConfigurator, WebConfigurator, WebPlugin};
 
 /// Wires Hangar's own components once the database and storage plugins are up:
-/// runs migrations, registers `BlobStore` / `JobQueue` and schedules the workers.
+/// runs migrations, registers `BlobStore` / `JobQueue` / `ApiTokens` / `BridgeHub`,
+/// schedules the workers and adds the access-token layer (outside sa-token's,
+/// which is why this plugin depends on `SaTokenPlugin`).
 struct HangarPlugin;
 
 #[async_trait]
@@ -46,6 +50,14 @@ impl Plugin for HangarPlugin {
             pipeline: cfg.pipeline(),
             cfg,
         };
+        // One cache for the layer and the routes (revoking a token ends its session).
+        let api_tokens = tokens::ApiTokens::new(db.clone());
+        let layer_tokens = api_tokens.clone();
+        app.add_router_layer(move |router| {
+            router.layer(summer_web::axum::middleware::from_fn_with_state(layer_tokens.clone(), tokens::layer))
+        });
+        app.add_component(api_tokens);
+        app.add_component(bridge::BridgeHub::default());
         app.add_component(store);
         app.add_component(queue);
         app.add_scheduler(move |_app| Box::new(jobs::run_workers(worker)));
@@ -56,7 +68,11 @@ impl Plugin for HangarPlugin {
     }
 
     fn dependencies(&self) -> Vec<&str> {
-        vec![std::any::type_name::<SeaOrmPlugin>(), std::any::type_name::<OpenDALPlugin>()]
+        vec![
+            std::any::type_name::<SeaOrmPlugin>(),
+            std::any::type_name::<OpenDALPlugin>(),
+            std::any::type_name::<SaTokenPlugin>(),
+        ]
     }
 }
 
@@ -75,7 +91,9 @@ async fn main() {
                 .exclude("/api/health")
                 .exclude("/api/setup")
                 .exclude("/api/auth/login")
-                .exclude("/api/auth/register"),
+                .exclude("/api/auth/register")
+                .exclude("/api/devices/pair")
+                .exclude("/api/devices/pair/poll"),
         )
         .run()
         .await

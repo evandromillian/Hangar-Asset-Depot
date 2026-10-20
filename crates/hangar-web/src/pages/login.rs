@@ -5,20 +5,28 @@ use crate::app::use_session;
 use hangar_core::RegisterRequest;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
-use leptos_router::hooks::use_navigate;
+use leptos_router::hooks::{use_navigate, use_query_map};
 
 #[component]
 pub fn LoginPage() -> impl IntoView {
     let session = use_session();
     let navigate = use_navigate();
     let setup = LocalResource::new(api::setup_status);
+    // `?volta=/dispositivos?codigo=…`: where to go after logging in (same site only).
+    let query = use_query_map();
+    let target = move || {
+        query
+            .with_untracked(|q| q.get("volta"))
+            .filter(|p| p.starts_with('/') && !p.starts_with("//"))
+            .unwrap_or_else(|| "/".into())
+    };
 
-    // Already logged in → go home.
+    // Already logged in → go on.
     {
         let navigate = navigate.clone();
         Effect::new(move |_| {
             if session.user.get().is_some() {
-                navigate("/", Default::default());
+                navigate(&target(), Default::default());
             }
         });
     }
@@ -68,7 +76,7 @@ pub fn LoginPage() -> impl IntoView {
             match res {
                 Ok(r) => {
                     session.user.set(Some(r.user));
-                    navigate("/", Default::default());
+                    navigate(&target(), Default::default());
                 }
                 Err(e) => error.set(Some(if e.status == 401 {
                     "Usuário ou senha inválidos.".into()

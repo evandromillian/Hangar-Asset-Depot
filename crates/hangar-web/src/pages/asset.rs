@@ -8,6 +8,7 @@ use crate::components::details::DetailsPanel;
 use crate::components::files::FilesPanel;
 use crate::components::materials::MaterialsPanel;
 use crate::components::new_version::NewVersionDialog;
+use crate::components::send_to_editor::SendToEditor;
 use crate::components::stage::Stage;
 use crate::components::versions::VersionTimeline;
 use crate::viewer::ViewerDraft;
@@ -220,6 +221,7 @@ pub fn AssetPage() -> impl IntoView {
                         })
                 }}
                 <div class="head-actions">
+                    <SendToEditor version=selected_version />
                     <Show when=move || is_owner.get()>
                         <button
                             class="btn btn-ghost"
