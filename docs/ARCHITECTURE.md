@@ -1,136 +1,139 @@
-# Hangar — arquitetura
+# Hangar — architecture
 
-Hangar é um gerenciador de ativos digitais (DAM) para 3D e games, escrito 100% em Rust:
-armazena, versiona e visualiza modelos, texturas, áudio e afins. O caso de uso central é
-o de um modelo comprado (ex.: um tanque) que precisa de correções e melhorias ao longo do
-tempo, mantendo o histórico e permitindo comparar versões, LODs e variantes de textura
-(deserto, floresta, inverno...).
+Hangar is a digital asset manager (DAM) for 3D and game content, written 100% in Rust: it
+stores, versions and previews models, textures, audio and the like. The core use case is a
+purchased model (e.g. a tank) that needs fixes and improvements over time, keeping its
+history and making it easy to compare versions, LODs and texture variants (desert, woodland,
+winter...).
 
 ```
-┌──────────────────────── navegador (wasm32) ────────────────────────┐
+┌──────────────────────── browser (wasm32) ───────────────────────────┐
 │  hangar-web                                                         │
-│  ├─ Leptos 0.8 (CSR): biblioteca, detalhe do asset, upload, versões │
-│  └─ Bevy 0.19 (WebGL2) via leptos-bevy-canvas: viewer 3D             │
-│        câmera orbital · LOD · variantes · wireframe · grid           │
+│  ├─ Leptos 0.8 (CSR): library, asset detail, upload, versions       │
+│  └─ Bevy 0.19 (WebGL2) via leptos-bevy-canvas: 3D viewer            │
+│        orbit camera · LOD · variants · wireframe · grid             │
 └───────────────▲─────────────────────────────────────────────────────┘
-                │ REST/JSON + blobs (cookie HttpOnly ou Bearer)
+                │ REST/JSON + blobs (HttpOnly cookie or Bearer)
 ┌───────────────┴──────────── hangar-server (summer-rs) ──────────────┐
-│ WebPlugin (axum) ─ rotas /api/**                                     │
-│ SaTokenPlugin    ─ sessões/login (memória ou Redis)                  │
-│ SeaOrmPlugin     ─ Postgres (metadados, versões, árvore de arquivos) │
-│ OpenDALPlugin    ─ blobs content-addressed (fs local ou S3/MinIO)    │
-│ JobsPlugin       ─ fila em Postgres (SKIP LOCKED) + workers          │
+│ WebPlugin (axum) ─ /api/** routes                                    │
+│ SaTokenPlugin    ─ sessions/login (memory or Redis)                  │
+│ SeaOrmPlugin     ─ Postgres (metadata, versions, file trees)         │
+│ OpenDALPlugin    ─ content-addressed blobs (local fs or S3/MinIO)    │
+│ JobsPlugin       ─ Postgres queue (SKIP LOCKED) + workers            │
 │        └─ hangar-pipeline (spawn_blocking)                           │
-│             ufbx · gltf · tobj · Blender headless (fallback)         │
-│             LODs (meshoptimizer) · variantes · GLB · thumbnails      │
+│             ufbx · gltf · tobj · headless Blender (fallback)         │
+│             LODs (meshoptimizer) · variants · GLB · thumbnails       │
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
 ## Crates
 
-| crate | alvo | papel |
+| crate | target | role |
 |---|---|---|
-| `hangar-core` | native + wasm | DTOs da API, enums, manifesto de preview, utilitários de caminho |
-| `hangar-pipeline` | native | importação (FBX/glTF/OBJ/Blender), resolução de texturas, detecção de variantes, LODs, exportação GLB, thumbnail por rasterização em software, metadados de áudio |
-| `hangar-server` | native | API REST em summer-rs, storage, versionamento, fila de jobs |
-| `hangar-web` | wasm32 | UI Leptos + viewer Bevy |
-| `hangar-cli` | native | `hangar push/pull/versions/diff` — envia uma pasta como nova versão (só o que mudou) |
+| `hangar-core` | native + wasm | API DTOs, enums, preview manifest, path utilities |
+| `hangar-pipeline` | native | import (FBX/glTF/OBJ/Blender), texture resolution, variant detection, LODs, GLB export, software-rasterized thumbnails, audio metadata |
+| `hangar-server` | native | summer-rs REST API, storage, versioning, job queue |
+| `hangar-web` | wasm32 | Leptos UI + Bevy viewer |
+| `hangar-cli` | native | `hangar push/pull/versions/diff` — sends a folder as a new version (only what changed) |
 
-## Modelo de versionamento
+## Versioning model
 
-O versionamento segue a ideia de um commit do git, mas por **asset** e com arquivos
-binários grandes:
+Versioning follows the idea of a git commit, but per **asset** and with large binary files:
 
-* **Blob** — conteúdo imutável identificado pelo BLAKE3 do arquivo. Guardado uma única vez
-  em `blobs/ab/cd/<hash>` no OpenDAL. Duas versões que compartilham a mesma textura de
-  200 MB ocupam 200 MB, não 400.
-* **Versão** — snapshot imutável: uma árvore `caminho → blob` + `parent_id` + mensagem +
-  autor. A numeração (`v1`, `v2`, …) é sequencial por asset; o `parent_id` forma um DAG,
-  então dá para “ramificar” (ex.: v4 corrige o casco a partir de v2, ignorando a v3).
-* **Head** — a versão exibida por padrão no asset. Toda versão nova vira head (opcional).
-* **Commit incremental** — `POST /api/assets/{id}/versions` com `parent_id` e
-  `inherit=true` parte da árvore do pai e aplica `upserts`/`deletes`. Para corrigir o mesh
-  basta enviar o novo `.fbx`; as texturas são herdadas sem upload. Na web, "Arquivos →
-  Adicionar arquivos" abre esse fluxo sobre a versão selecionada: um arquivo com o mesmo nome
-  de exatamente um arquivo existente o substitui no lugar (ex.: textura corrigida em
-  `Texture1/`), uma **pasta de destino** posiciona conteúdo novo (ex.: `Animations/`) e uma
-  pasta arrastada mantém o próprio nome (salvo quando é a pasta raiz do asset de novo).
-* **Upload deduplicado** — o cliente calcula o BLAKE3 de cada arquivo (no browser, em
-  wasm), pergunta `POST /api/blobs/missing` quais faltam e só envia esses com
-  `PUT /api/blobs/{hash}` (streaming; o servidor recalcula e valida o hash).
-* **Diff** — `GET /api/versions/{id}/diff?against=` compara duas árvores
-  (adicionados / removidos / modificados / inalterados).
+* **Blob** — immutable content identified by the file's BLAKE3 hash. Stored exactly once at
+  `blobs/ab/cd/<hash>` in OpenDAL. Two versions sharing the same 200 MB texture take up
+  200 MB, not 400.
+* **Version** — immutable snapshot: a `path → blob` tree + `parent_id` + message + author.
+  Numbering (`v1`, `v2`, …) is sequential per asset; `parent_id` forms a DAG, so you can
+  "branch" (e.g. v4 fixes the hull starting from v2, skipping v3).
+* **Head** — the version shown by default for the asset. Every new version becomes head
+  (optional).
+* **Incremental commit** — `POST /api/assets/{id}/versions` with `parent_id` and
+  `inherit=true` starts from the parent's tree and applies `upserts`/`deletes`. To fix the
+  mesh you only send the new `.fbx`; textures are inherited without uploading. On the web,
+  "Arquivos → Adicionar arquivos" (Files → Add files) opens this flow on top of the selected
+  version: a file with the same name as exactly one existing file replaces it in place (e.g.
+  a fixed texture in `Texture1/`), a **target folder** places new content (e.g.
+  `Animations/`), and a dragged folder keeps its own name (unless it is the asset's root
+  folder again).
+* **Deduplicated upload** — the client computes each file's BLAKE3 (in the browser, in
+  wasm), asks `POST /api/blobs/missing` which ones are missing and only sends those with
+  `PUT /api/blobs/{hash}` (streaming; the server re-hashes and validates).
+* **Diff** — `GET /api/versions/{id}/diff?against=` compares two trees
+  (added / removed / modified / unchanged).
 
 ```mermaid
 graph LR
-  v1["v1 · original comprado"] --> v2["v2 · preenche parte inferior do casco"]
-  v2 --> v3["v3 · nova camuflagem inverno"]
-  v2 --> v4["v4 · LODs refeitos (ramo a partir de v2)"]
+  v1["v1 · original purchase"] --> v2["v2 · fills the lower hull"]
+  v2 --> v3["v3 · new winter camo"]
+  v2 --> v4["v4 · redone LODs (branch from v2)"]
 ```
 
-## Pipeline de processamento
+## Processing pipeline
 
-Cada versão nova enfileira um job `process_version`. O worker baixa os arquivos
-relevantes (modelos, imagens, áudio) para um diretório temporário e chama
-`hangar_pipeline::process` em `spawn_blocking`:
+Every new version enqueues a `process_version` job. The worker downloads the relevant files
+(models, images, audio) to a temporary directory and calls `hangar_pipeline::process` inside
+`spawn_blocking`:
 
-1. **Arquivo primário** — `.glb/.gltf` > `.fbx` > `.obj` > `.blend`. Vários arquivos de
-   modelo com sufixo `_LOD0`, `_LOD1`… são tratados como LODs autorais. Com mais de um FBX,
-   cada um é inspecionado: arquivos sem geometria não viram modelo, e nomes `Modelo@Clipe.fbx`
-   perdem a preferência. Os demais FBX cujos takes se movem são **arquivos de animação**: os
-   takes são aplicados ao modelo casando nós pelo nome (sem maiúsculas e sem namespace —
-   `mixamorig:Hips` ↔ `Hips`); takes com nome genérico ("Take 001", "mixamo.com") recebem o
-   nome do arquivo (`Shark@Swim.fbx` → "Swim"). Uma versão **só com animações** (nenhum
-   FBX com malha) vira `kind: animation`: ver *Esqueletos de referência* abaixo.
-2. **Importação** — `ufbx` (FBX, normaliza para Y-up/metros), `gltf` e `tobj`. Materiais
-   glTF no modelo antigo `KHR_materials_pbrSpecularGlossiness` (ex.: Microsoft glTF
-   Exporter) viram metal/rough: difusa → base color, rugosidade = 1 − glossiness (o alfa da
-   textura specular-glossiness vira um mapa de rugosidade), metálico 0. Se o modelo não abre,
-   a versão cai para a pré-visualização das imagens e `model_error` explica o motivo no palco.
-   Formatos não suportados nativamente (ex.: `.blend`) ou falhas caem no **fallback do
-   Blender headless** (`tools/blender/export_glb.py`), quando configurado.
-3. **Resolução de texturas** — FBX comprados costumam apontar para `C:\Users\artista\...`.
-   O pipeline tenta, em ordem: caminho exato → mesmo nome de arquivo em qualquer pasta →
-   mesmo slot e mesmos números/tiles (`low1_BaseColor.1001.png` → `Tank_BaseColor.1001.png`)
-   → **atribuição manual** (`.hangar/materials.json`, ver abaixo) → nome do material
-   (`M_Body` ↔ `T_Body_BaseColor.png`) → "irmãos" de uma textura já resolvida (mesma pasta e
-   nome, só o slot muda: `Tank_BaseColor.1001` → `Tank_Normal.1001`). O slot é detectado
-   pelo sufixo (`_D`, `_BaseColor`, `_N`, `_ORM`, `_R`, `_M`, `_AO`, `_E`, `_S`...).
-   **Specular:** mapas de nível especular (`_S`, `_Spec`, `_Specular`; slot specular do FBX,
-   `map_Ks` do OBJ, `KHR_materials_specular` do glTF) seguem a convenção de refletância
-   (0,5 = os 4 % padrão de F0, como o *Specular* da Unreal) e vão para o GLB como
-   `KHR_materials_specular` (`specularColorTexture` com `specularColorFactor` 2, a conversão
-   indicada pela extensão). Mapas de glossiness (`_Gloss`) não são specular. Só afeta
-   superfícies não metálicas.
-4. **Variantes de textura** — dois arquivos que diferem em um único token que não é um slot
-   nem um número (`Desert/T_Body_D.png` × `Woodland/T_Body_D.png`, ou `T_Body_Desert_D` ×
-   `T_Body_Woodland_D`) formam variantes. A primeira referenciada pelo modelo é a padrão.
-   Skins manuais de `.hangar/materials.json` entram com `detected_by: "manual"`.
-5. **LODs** — autorais (por nome) ou gerados com `meshopt::simplify` (50% / 25% / 10% por
-   padrão), cada um exportado como **GLB autocontido** com texturas reduzidas.
-   **Animação (FBX e glTF/GLB):** no FBX, quando algum take realmente se move (o "Take 001"
-   vazio que quase todo exportador grava é ignorado), cada take é amostrado na taxa de
-   quadros do arquivo com `ufbx::bake_anim`; no glTF as animações são lidas direto (STEP e
-   CUBICSPLINE viram chaves lineares; pesos de morph targets não são exportados). O GLB
-   ganha a hierarquia de nós (sob um nó raiz único), as skins (até 4 ossos por vértice) e os
-   clipes; chaves que a interpolação reproduz (0,1 mm / ~0,01°) são descartadas. As malhas continuam em espaço de mundo no resto do
-   pipeline; o writer do GLB leva as partes rígidas para o espaço do seu nó. O manifesto
-   lista os clipes em `animations` (nome, duração, fps, quadros e, para clipes de arquivos
-   separados, `source`).
-6. **Thumbnail** — rasterizador em software (z-buffer + Lambert + textura base) gera um
-   PNG sem precisar de GPU no servidor.
-7. **Texturas e áudio** — previews web (PNG/JPEG ≤ 2048 px) e envelope de picos para
-   waveform de WAV.
+1. **Primary file** — `.glb/.gltf` > `.fbx` > `.obj` > `.blend`. Several model files with
+   `_LOD0`, `_LOD1`… suffixes are treated as authored LODs. With more than one FBX, each one
+   is inspected: files without geometry don't become the model, and `Model@Clip.fbx` names
+   lose preference. The remaining FBX files whose takes move are **animation files**: their
+   takes are applied to the model by matching nodes by name (case-insensitive, namespace
+   stripped — `mixamorig:Hips` ↔ `Hips`); takes with a generic name ("Take 001",
+   "mixamo.com") get the file's name (`Shark@Swim.fbx` → "Swim"). A version with **only
+   animations** (no FBX with a mesh) becomes `kind: animation`: see *Reference skeletons*
+   below.
+2. **Import** — `ufbx` (FBX, normalized to Y-up/meters), `gltf` and `tobj`. glTF materials
+   using the legacy `KHR_materials_pbrSpecularGlossiness` model (e.g. Microsoft glTF
+   Exporter) are converted to metal/rough: diffuse → base color, roughness = 1 − glossiness
+   (the specular-glossiness texture's alpha becomes a roughness map), metallic 0. If the
+   model can't be opened, the version falls back to the image preview and `model_error`
+   explains why on the stage. Formats not supported natively (e.g. `.blend`) or failures fall
+   back to **headless Blender** (`tools/blender/export_glb.py`), when configured.
+3. **Texture resolution** — purchased FBX files often point to `C:\Users\artist\...`. The
+   pipeline tries, in order: exact path → same file name in any folder → same slot and same
+   numbers/tiles (`low1_BaseColor.1001.png` → `Tank_BaseColor.1001.png`) → **manual
+   assignment** (`.hangar/materials.json`, see below) → material name
+   (`M_Body` ↔ `T_Body_BaseColor.png`) → "siblings" of an already resolved texture (same
+   folder and name, only the slot changes: `Tank_BaseColor.1001` → `Tank_Normal.1001`). The
+   slot is detected from the suffix (`_D`, `_BaseColor`, `_N`, `_ORM`, `_R`, `_M`, `_AO`,
+   `_E`, `_S`...).
+   **Specular:** specular level maps (`_S`, `_Spec`, `_Specular`; the FBX specular slot, OBJ
+   `map_Ks`, glTF `KHR_materials_specular`) follow the reflectance convention (0.5 = the
+   default 4 % F0, like Unreal's *Specular*) and go into the GLB as
+   `KHR_materials_specular` (`specularColorTexture` with `specularColorFactor` 2, the
+   conversion the extension recommends). Glossiness maps (`_Gloss`) are not specular. Only
+   affects non-metallic surfaces.
+4. **Texture variants** — two files that differ by a single token that is neither a slot nor
+   a number (`Desert/T_Body_D.png` × `Woodland/T_Body_D.png`, or `T_Body_Desert_D` ×
+   `T_Body_Woodland_D`) form variants. The first one referenced by the model is the default.
+   Manual skins from `.hangar/materials.json` come in with `detected_by: "manual"`.
+5. **LODs** — authored (by name) or generated with `meshopt::simplify` (50% / 25% / 10% by
+   default), each exported as a **self-contained GLB** with downscaled textures.
+   **Animation (FBX and glTF/GLB):** for FBX, when some take actually moves (the empty
+   "Take 001" almost every exporter writes is ignored), each take is sampled at the file's
+   frame rate with `ufbx::bake_anim`; for glTF, animations are read directly (STEP and
+   CUBICSPLINE become linear keys; morph target weights are not exported). The GLB gets the
+   node hierarchy (under a single root node), the skins (up to 4 bones per vertex) and the
+   clips; keys that interpolation reproduces (0.1 mm / ~0.01°) are dropped. Meshes stay in
+   world space through the rest of the pipeline; the GLB writer moves rigid parts into their
+   node's space. The manifest lists the clips in `animations` (name, duration, fps, frames
+   and, for clips from separate files, `source`).
+6. **Thumbnail** — a software rasterizer (z-buffer + Lambert + base texture) renders a PNG
+   without needing a GPU on the server.
+7. **Textures and audio** — web previews (PNG/JPEG ≤ 2048 px) and a peak envelope for WAV
+   waveforms.
 
-O resultado é um `PreviewManifest` (JSON em `asset_versions.preview`) + blobs gerados
-(registrados em `renditions`). O viewer só consome GLB e imagens web.
+The result is a `PreviewManifest` (JSON in `asset_versions.preview`) + generated blobs
+(recorded in `renditions`). The viewer only consumes GLBs and web images.
 
-### Materiais manuais (`.hangar/materials.json`)
+### Manual materials (`.hangar/materials.json`)
 
-Quando a heurística não basta, a aba **Materiais** da página do asset permite escolher a
-textura de cada slot de cada material e criar **skins** (conjuntos alternativos). As
-alterações aparecem na hora no viewer (pré-visualização) e, ao salvar, viram uma **nova
-versão** que herda a anterior e acrescenta só este arquivo — nenhuma textura é reenviada:
+When the heuristics aren't enough, the **Materiais** (Materials) tab on the asset page lets
+you pick the texture for each slot of each material and create **skins** (alternative sets).
+Changes show up immediately in the viewer (preview) and, when saved, become a **new version**
+that inherits the previous one and adds only this file — no texture is uploaded again:
 
 ```json
 {
@@ -138,98 +141,99 @@ versão** que herda a anterior e acrescenta só este arquivo — nenhuma textura
     "a1": { "base_color": "Tank_BaseColor.1001.png", "normal": null }
   },
   "skins": [
-    { "name": "Deserto", "materials": { "a1": { "base_color": "Desert/Tank_BaseColor.1001.png" } } }
+    { "name": "Desert", "materials": { "a1": { "base_color": "Desert/Tank_BaseColor.1001.png" } } }
   ]
 }
 ```
 
-* `materials`: slot → caminho força a textura; `null` força o slot vazio; slots ausentes
-  continuam automáticos. Nomes de material são comparados sem diferenciar maiúsculas.
-* `skins`: cada skin lista só o que muda em relação à base.
-* O pipeline aplica a base nos GLBs e na thumbnail; problemas (material ou arquivo
-  inexistente) viram `warnings`. A CLI envia o arquivo quando ele existe na pasta, e
-  `--mirror` nunca o apaga.
-* `alpha_cutoff`: material → limiar (0–1) do recorte de transparência.
-* `texture_sets`: ids de assets cujas imagens o modelo compartilha (ver abaixo).
+* `materials`: slot → path forces the texture; `null` forces the slot empty; missing slots
+  stay automatic. Material names are compared case-insensitively.
+* `skins`: each skin lists only what changes relative to the base.
+* The pipeline applies the base to the GLBs and the thumbnail; problems (missing material or
+  file) become `warnings`. The CLI sends the file when it exists in the folder, and
+  `--mirror` never deletes it.
+* `alpha_cutoff`: material → threshold (0–1) for alpha cutout.
+* `texture_sets`: ids of assets whose images the model shares (see below).
 
-### Conjuntos de texturas compartilhados (`texture_sets`)
+### Shared texture sets (`texture_sets`)
 
-Pacotes como o "Spark City" trazem vários modelos que usam o mesmo conjunto de texturas.
-O conjunto vira **um asset** (tipo textura) e cada modelo o **vincula** em
-`.hangar/materials.json` (`"texture_sets": ["<id do asset>"]`), pela aba **Materiais**
-ou com `hangar push --texture-set <id>` (`tools/import-folders.ps1 -TextureSet <id>`).
+Packages like "Spark City" ship several models that use the same set of textures. The set
+becomes **one asset** (texture kind) and each model **links** it in `.hangar/materials.json`
+(`"texture_sets": ["<asset id>"]`), through the **Materiais** tab or with
+`hangar push --texture-set <id>` (`tools/import-folders.ps1 -TextureSet <id>`).
 
-* No processamento, o worker baixa as imagens da **head** de cada conjunto para a pasta de
-  trabalho sob `@<slug>/` e as passa em `ProcessInput::texture_sets`. O autor da versão
-  precisa enxergar o conjunto (mesmo projeto, membro do projeto dele ou admin); senão a
-  entrada fica com `error` e o nome não é revelado.
-* As imagens do conjunto ficam **atrás** das da própria versão: referências do modelo que
-  não existem nela são achadas no conjunto pelo nome do arquivo (`resolved_by:
-  "texture-set"`, irmãs como `_Normal` incluídas); as heurísticas por nome de material
-  só olham os arquivos da versão. Atribuição manual usa o caminho `@<slug>/<arquivo>`.
-* O manifesto registra cada conjunto em `texture_sets` (nome, prefixo, versão usada, erro)
-  e lista as imagens dele em `textures` com o prefixo; a UI baixa o original da versão do
-  conjunto (`texture_location`).
-* Uma nova head do conjunto (commit com `set_head` ou troca de head) recoloca na fila as
-  heads cujo manifesto o usa, então todos os modelos pegam as texturas novas.
+* During processing, the worker downloads the images of each set's **head** into the work
+  directory under `@<slug>/` and passes them in `ProcessInput::texture_sets`. The version's
+  author must be able to see the set (same project, member of its project, or admin);
+  otherwise the entry gets an `error` and its name is not revealed.
+* The set's images rank **behind** the version's own: model references that don't exist in
+  the version are found in the set by file name (`resolved_by: "texture-set"`, siblings such
+  as `_Normal` included); material-name heuristics only look at the version's own files.
+  Manual assignment uses the `@<slug>/<file>` path.
+* The manifest records each set in `texture_sets` (name, prefix, version used, error) and
+  lists its images in `textures` with the prefix; the UI downloads the original from the
+  set's version (`texture_location`).
+* A new head of the set (commit with `set_head` or head change) re-queues the heads whose
+  manifest uses it, so every model picks up the new textures.
 
-### Esqueletos de referência (`.hangar/animation.json`)
+### Reference skeletons (`.hangar/animation.json`)
 
-Animações exportadas sem malha (ex.: animações do Unreal, só os ossos) não têm onde tocar.
-Para elas existe uma configuração do sistema, **Esqueletos** (`/admin/skeletons`, só
-admins): cada esqueleto tem nome, um identificador imutável (`ue5-manny`) e aponta para um
-**asset de modelo comum** (o FBX do SK_Mannequin / SKM_Manny com skin e texturas, enviado
-como qualquer asset). Sempre vale a versão *head* desse asset.
+Animations exported without a mesh (e.g. Unreal animations, bones only) have nothing to play
+on. For them there is a system setting, **Esqueletos** (Skeletons) (`/admin/skeletons`,
+admins only): each skeleton has a name, an immutable identifier (`ue5-manny`) and points to a
+**regular model asset** (the SK_Mannequin / SKM_Manny FBX with skin and textures, uploaded
+like any other asset). The *head* version of that asset always applies.
 
-* A aba **Animação** de uma versão só com animações lista os clipes e os esqueletos
-  cadastrados; marcar esqueletos e salvar cria uma **nova versão** com
-  `{"skeletons": ["ue5-manny", "ue4-mannequin"]}` em `.hangar/animation.json`.
-* No processamento, o worker resolve cada identificador para a head do asset do esqueleto,
-  baixa os arquivos dela para outro diretório temporário e passa como
-  `ProcessInput::skeletons`. Para cada esqueleto o pipeline importa o FBX do modelo com os
-  arquivos de animação da versão como fontes externas (ossos casados pelo nome, como em
-  `Modelo@Clipe.fbx`), descarta os takes do próprio modelo e grava um GLB (texturas ≤ 1024
-  px; rendition `skeleton_glb`, chave = identificador). O manifesto ganha uma entrada em
-  `skeletons` por identificador, na ordem do arquivo: GLB, clipes que movem algum osso,
-  `bones_matched`/`bones_total`, versão do esqueleto usada e `error` quando nada casou ou o
-  esqueleto não existe. A thumbnail é o primeiro esqueleto no meio do primeiro clipe
-  (pose calculada na CPU, `pose.rs`). `animations` lista todos os clipes dos arquivos.
-* Um asset de animação é um **pacote** ("Rocket Launcher", "Free Fall"): uma versão com
-  um ou vários FBX de animação, organizados em pastas à vontade; o botão **+ Adicionar
-  animações** da aba cria uma versão nova do mesmo pacote, que herda o
-  `.hangar/animation.json`. Clipes de pastas diferentes aparecem agrupados.
-* **Animações enviadas junto com uma malha tocam só nela**: se a versão tem um FBX com
-  geometria *feito para essas animações* (metade ou mais dos nós de um arquivo de animação
-  existem nele, `fbx::animates`), `.hangar/animation.json` é ignorado (com aviso). Malhas
-  que não compartilham ossos com as animações — a arma que acompanha um pacote — não são a
-  malha delas: ficam fora da pré-visualização (aviso) e o pacote toca nos esqueletos.
-* Canais constantes (o Unreal grava todos os ossos em todo quadro) viram duas chaves no GLB,
-  o que mantém pequenos os GLBs de pacotes grandes.
-* Cada animação guarda a própria cópia do GLB do esqueleto; um modelo novo do esqueleto só
-  vale depois de reprocessar. A página de esqueletos mostra quantas animações estão
-  desatualizadas e tem **Reprocessar animações** (heads que usam o esqueleto).
+* The **Animação** (Animation) tab of an animation-only version lists the clips and the
+  registered skeletons; ticking skeletons and saving creates a **new version** with
+  `{"skeletons": ["ue5-manny", "ue4-mannequin"]}` in `.hangar/animation.json`.
+* During processing, the worker resolves each identifier to the head of the skeleton's asset,
+  downloads its files into another temporary directory and passes them as
+  `ProcessInput::skeletons`. For each skeleton the pipeline imports the model's FBX with the
+  version's animation files as external sources (bones matched by name, as with
+  `Model@Clip.fbx`), discards the model's own takes and writes a GLB (textures ≤ 1024 px;
+  rendition `skeleton_glb`, key = identifier). The manifest gets one entry in `skeletons`
+  per identifier, in file order: GLB, clips that move at least one bone,
+  `bones_matched`/`bones_total`, the skeleton version used, and `error` when nothing matched
+  or the skeleton doesn't exist. The thumbnail is the first skeleton halfway through the
+  first clip (pose computed on the CPU, `pose.rs`). `animations` lists every clip of the
+  files.
+* An animation asset is a **package** ("Rocket Launcher", "Free Fall"): a version with one
+  or more animation FBX files, organized in folders however you like; the tab's
+  **+ Adicionar animações** (Add animations) button creates a new version of the same
+  package, which inherits `.hangar/animation.json`. Clips from different folders are shown
+  grouped.
+* **Animations uploaded together with a mesh only play on it**: if the version has an FBX
+  with geometry *made for those animations* (half or more of an animation file's nodes exist
+  in it, `fbx::animates`), `.hangar/animation.json` is ignored (with a warning). Meshes that
+  share no bones with the animations — the weapon that comes with a package — are not their
+  mesh: they are left out of the preview (warning) and the package plays on the skeletons.
+* Constant channels (Unreal writes every bone on every frame) become two keys in the GLB,
+  which keeps the GLBs of large packages small.
+* Each animation keeps its own copy of the skeleton GLB; a new skeleton model only applies
+  after reprocessing. The skeletons page shows how many animations are outdated and has
+  **Reprocessar animações** (Reprocess animations) (heads that use the skeleton).
 
-## Viewer 3D
+## 3D viewer
 
-Bevy 0.19 roda dentro de um `<canvas>` gerenciado pelo Leptos (`leptos-bevy-canvas`).
-O Leptos faz todo o HTTP e envia mensagens ao Bevy:
+Bevy 0.19 runs inside a `<canvas>` managed by Leptos (`leptos-bevy-canvas`). Leptos does all
+the HTTP and sends messages to Bevy:
 
-* `LoadModel { bytes }` — GLB do LOD escolhido (via fonte de assets em memória);
-  a câmera é preservada entre versões, então alternar v1/v2 funciona como comparação A/B.
-  Em versões só com animações, o seletor de LOD vira o seletor de **esqueleto**
-  (`PreviewManifest::on_skeleton` monta um manifesto de modelo com o GLB do esqueleto).
-* `ApplyVariant { textures, hidden }` — troca as texturas dos materiais por nome e oculta
-  texturas (pré-visualização da aba Materiais).
+* `LoadModel { bytes }` — GLB of the chosen LOD (through an in-memory asset source); the
+  camera is preserved across versions, so switching v1/v2 works as an A/B comparison. In
+  animation-only versions, the LOD selector becomes the **skeleton** selector
+  (`PreviewManifest::on_skeleton` builds a model manifest with the skeleton's GLB).
+* `ApplyVariant { textures, hidden }` — swaps material textures by name and hides textures
+  (preview for the Materiais tab).
 * `SetWireframe`, `SetAutoRotate`, `SetGrid`, `ResetCamera`.
-* `SelectAnimation`, `SetAnimationPaused`, `StepAnimation(±quadros)`, `SeekAnimation(s)`,
-  `SetAnimationSpeed` — barra de animação (seletor com anterior/próxima, pausa, quadro a
-  quadro, primeiro/último quadro e velocidade,
-  negativa toca ao contrário). Os clipes do GLB vão para um `AnimationGraph`; o Bevy
-  responde com `AnimationTime` para o contador de quadros.
+* `SelectAnimation`, `SetAnimationPaused`, `StepAnimation(±frames)`, `SeekAnimation(s)`,
+  `SetAnimationSpeed` — animation bar (selector with previous/next, pause, frame by frame,
+  first/last frame and speed; negative speed plays backwards). The GLB's clips go into an
+  `AnimationGraph`; Bevy answers with `AnimationTime` for the frame counter.
 
-Controles: botão esquerdo orbita, direito/meio faz pan, roda dá zoom, `F` enquadra.
+Controls: left button orbits, right/middle pans, wheel zooms, `F` frames the model.
 
-## Banco de dados (Postgres)
+## Database (Postgres)
 
 ```
 users(id, username, display_name, password_hash, is_admin, created_at)
@@ -240,105 +244,196 @@ assets(id, project_id, slug, name, kind, description, tags jsonb, source jsonb,
        head_version_id, created_by, created_at, updated_at)
 asset_versions(id, asset_id, number, parent_id, message, author_id, status, error,
                preview jsonb, file_count, total_size, created_at, processed_at)
-version_files(version_id, path, blob_hash, size)          -- a árvore
+version_files(version_id, path, blob_hash, size)          -- the tree
 renditions(version_id, kind, key, blob_hash, meta)         -- LOD GLBs, thumbs, previews
 jobs(id, kind, payload, status, attempts, max_attempts, run_after, locked_at, last_error)
-skeletons(id, slug, name, description, asset_id, created_by, created_at)  -- esqueletos de referência
-api_tokens(id, user_id, name, client, token_hash, created_at, last_used_at)  -- tokens dos plugins
+skeletons(id, slug, name, description, asset_id, created_by, created_at)  -- reference skeletons
+api_tokens(id, user_id, name, client, token_hash, created_at, last_used_at)  -- plugin tokens
 device_pairings(id, device_code_hash, user_code, client, device_name, detail,
-                created_at, expires_at, status, approved_by)  -- pareamentos pendentes
+                created_at, expires_at, status, approved_by)  -- pending pairings
 ```
 
-As migrations são SQL puro embutido no binário (`crates/hangar-server/migrations`),
-aplicadas no boot com controle em `schema_migrations`.
+Migrations are plain SQL embedded in the binary (`crates/hangar-server/migrations`), applied
+at boot and tracked in `schema_migrations`.
 
-## Permissões
+## Permissions
 
-* `is_admin` (global) — vê tudo, cria usuários, vê a fila de jobs. O primeiro usuário
-  registrado vira admin.
-* Por projeto: `owner` (gerencia membros, apaga assets), `editor` (cria assets e versões),
-  `viewer` (somente leitura).
-* Blobs são endereçados por hash de 256 bits; o download exige login e o hash funciona como
-  capability (não é enumerável). Arquivos por caminho (`/raw/`) e zip verificam o projeto.
+* `is_admin` (global) — sees everything, creates users, sees the job queue. The first
+  registered user becomes admin.
+* Per project: `owner` (manages members, deletes assets), `editor` (creates assets and
+  versions), `viewer` (read-only).
+* Blobs are addressed by a 256-bit hash; downloading requires login and the hash acts as a
+  capability (it can't be enumerated). Files by path (`/raw/`) and zips check the project.
 
-## Plugins de editor ("Enviar para Unreal")
+## Editor plugins ("Enviar para Unreal")
 
-O plugin do Unreal (`tools/unreal/Hangar`) não escuta porta nenhuma: ele mantém aberta uma
-conexão de saída com o servidor (`GET /api/bridge/events`, server-sent events) e o servidor
-repassa a ele o que a web manda. Funciona igual com o Hangar na nuvem, atrás de NAT e de
-firewall, e a página sabe quais editores estão online. (A alternativa — a página falar com
-`localhost` como faz o Meshy — esbarra no prompt de Local Network Access do Chrome e só
-funciona com o navegador e o editor na mesma máquina.)
+The Unreal plugin (`tools/unreal/Hangar`) doesn't listen on any port: it keeps an outgoing
+connection to the server open (`GET /api/bridge/events`, server-sent events) and the server
+relays to it whatever the web page sends. It works the same with Hangar in the cloud, behind
+NAT and firewalls, and the page knows which editors are online. (The alternative — the page
+talking to `localhost`, as Meshy does — runs into Chrome's Local Network Access prompt and
+only works with the browser and the editor on the same machine.)
 
-1. **Pareamento** (fluxo de dispositivo, como o OAuth device flow): o plugin chama
-   `POST /api/devices/pair`, abre `/dispositivos?codigo=XXXX-XXXX` no navegador e consulta
-   `POST /api/devices/pair/poll` com o seu `device_code` secreto. O usuário logado confere o
-   código e autoriza; a próxima consulta cria um token `hgr_…` (só o hash BLAKE3 fica no banco)
-   e o devolve uma única vez. A senha nunca passa pelo editor.
-2. **Tokens**: uma camada antes da do sa-token troca `Authorization: Bearer hgr_…` por uma
-   sessão do sa-token do dono do token, guardada em memória e conferida no banco a cada minuto
-   (revogar em `/dispositivos` vale em todas as instâncias em até 1 min; reiniciar o servidor
-   não desconecta os plugins).
-3. **Envio**: "Enviar para Unreal" (página do asset) → `POST /api/bridge/send` → evento
-   `import` no stream do editor escolhido. O plugin baixa `GET /api/versions/{vid}/bundle`
-   (arquivos por hash, imagens de conjuntos incluídas), importa e informa o progresso em
-   `POST /api/bridge/deliveries/{id}`; a página acompanha o envio.
+1. **Pairing** (device flow, like the OAuth device flow): the plugin calls
+   `POST /api/devices/pair`, opens `/dispositivos?codigo=XXXX-XXXX` in the browser and polls
+   `POST /api/devices/pair/poll` with its secret `device_code`. The logged-in user checks the
+   code and approves; the next poll creates an `hgr_…` token (only its BLAKE3 hash is stored)
+   and returns it exactly once. The password never goes through the editor.
+2. **Tokens**: a layer in front of sa-token's swaps `Authorization: Bearer hgr_…` for a
+   sa-token session of the token's owner, kept in memory and rechecked against the database
+   every minute (revoking on `/dispositivos` takes effect on every instance within 1 min;
+   restarting the server doesn't disconnect plugins).
+3. **Sending**: "Enviar para Unreal" (Send to Unreal, on the asset page) →
+   `POST /api/bridge/send` → `import` event on the chosen editor's stream. The plugin
+   downloads `GET /api/versions/{vid}/bundle` (files by hash, texture-set images included),
+   imports, and reports progress on `POST /api/bridge/deliveries/{id}`; the page follows the
+   delivery.
 
-O estado do bridge (editores conectados, envios) fica em memória por processo. Com mais de uma
-instância do servidor, o envio precisa chegar à instância que segura o stream do editor
-(Postgres `LISTEN/NOTIFY` na frente de `BridgeHub::push`); o balanceador deve permitir
-respostas longas (o servidor manda um comentário a cada 15 s).
+Bridge state (connected editors, deliveries) lives in memory per process. With more than one
+server instance, a send must reach the instance holding the editor's stream (Postgres
+`LISTEN/NOTIFY` in front of `BridgeHub::push`); the load balancer must allow long-lived
+responses (the server sends a comment every 15 s).
 
-## API REST
+## REST API
 
-Autenticação: cookie `hangar_token` (HttpOnly, definido no login) ou
-`Authorization: Bearer <token>` — token de sessão ou token de acesso `hgr_…` (plugins; ver
-"Plugins de editor").
+**Authentication:** cookie `hangar_token` (HttpOnly, set on login) or
+`Authorization: Bearer <token>` — either a session token or an `hgr_…` access token (plugins;
+see "Editor plugins"). Every `/api/**` route requires it except the ones marked
+**public** below.
 
-| método | rota | corpo → resposta |
+**Authorization:** project-scoped routes check membership through `access::{project, asset,
+version}`. Non-members get **404** (existence isn't leaked); an insufficient role gets
+**403**. Global admins act as owners everywhere.
+
+**Errors:** HTTP status + plain-text body (summer-web `KnownWebError`). User-facing messages
+are in Brazilian Portuguese.
+
+Request/response types live in `crates/hangar-core/src/api.rs`; the pairing and bridge ones
+in `crates/hangar-core/src/bridge.rs`.
+
+| area | path prefix | source |
 |---|---|---|
-| GET | `/api/health` | `"ok"` |
-| GET | `/api/setup` | `SetupStatus` (público) |
-| POST | `/api/auth/register` | `RegisterRequest` → `LoginResponse` (primeiro usuário ou signup aberto) |
-| POST | `/api/auth/login` | `LoginRequest` → `LoginResponse` + cookie |
+| [System](#system) | `/api/health`, `/api/setup` | `auth.rs` |
+| [Authentication & users](#authentication--users) | `/api/auth/*`, `/api/users` | `auth.rs` |
+| [Projects & members](#projects--members) | `/api/projects/{pid}` | `routes/projects.rs` |
+| [Assets](#assets) | `/api/projects/{pid}/assets`, `/api/assets/{aid}` | `routes/assets.rs` |
+| [Versions](#versions) | `/api/assets/{aid}/versions`, `/api/versions/{vid}` | `routes/versions.rs` |
+| [Files & downloads](#files--downloads) | `/api/versions/{vid}/…` | `routes/versions.rs` |
+| [Blobs](#blobs) | `/api/blobs` | `routes/blobs.rs` |
+| [Reference skeletons](#reference-skeletons) | `/api/skeletons` | `routes/skeletons.rs` |
+| [Access tokens](#access-tokens) | `/api/tokens` | `routes/tokens.rs` |
+| [Device pairing](#device-pairing) | `/api/devices/pair` | `routes/tokens.rs` |
+| [Editor bridge](#editor-bridge) | `/api/bridge` | `routes/bridge.rs` |
+| [Administration](#administration) | `/api/jobs`, `/api/admin` | `routes/jobs.rs` |
+
+### System
+
+| method | path | body → response |
+|---|---|---|
+| GET | `/api/health` | **public** · `"ok"` |
+| GET | `/api/setup` | **public** · `SetupStatus` (`needs_setup` when no user exists yet, `allow_signup`, `blender_available`, server `version`) |
+
+### Authentication & users
+
+| method | path | body → response |
+|---|---|---|
+| POST | `/api/auth/register` | **public** · `RegisterRequest` → `LoginResponse` (first user, or when signup is open) |
+| POST | `/api/auth/login` | **public** · `LoginRequest` → `LoginResponse` + `hangar_token` cookie |
 | POST | `/api/auth/logout` | 204 |
 | GET | `/api/auth/me` | `UserDto` |
-| GET/POST | `/api/users` | admin: lista / `CreateUserRequest` |
-| GET/POST | `/api/projects` | `Vec<ProjectDto>` / `CreateProjectRequest` → `ProjectDto` |
-| GET | `/api/projects/{pid}` | `ProjectDto` |
-| GET/POST | `/api/projects/{pid}/members` | `Vec<MemberDto>` / `AddMemberRequest` |
-| DELETE | `/api/projects/{pid}/members/{uid}` | 204 |
-| GET | `/api/projects/{pid}/assets?q=&kind=&tag=&page=&size=` | `Page<AssetSummary>` |
-| POST | `/api/projects/{pid}/assets` | `CreateAssetRequest` → `AssetDetail` |
-| GET/PATCH/DELETE | `/api/assets/{aid}` | `AssetDetail` / `UpdateAssetRequest` |
-| GET | `/api/assets/{aid}/versions` | `Vec<VersionDto>` (mais nova primeiro) |
-| POST | `/api/assets/{aid}/versions` | `CommitVersionRequest` → `VersionDto` |
-| GET | `/api/versions/{vid}` | `VersionDto` |
-| GET | `/api/versions/{vid}/files` | `Vec<FileEntry>` |
-| GET | `/api/versions/{vid}/diff?against=` | `VersionDiff` |
-| POST | `/api/versions/{vid}/reprocess` | `VersionDto` |
-| GET | `/api/versions/{vid}/raw/{*path}` | bytes do arquivo (`?download=1` força anexo) |
-| GET | `/api/versions/{vid}/archive` | zip da árvore (+ imagens de conjuntos de texturas usadas, em `@slug/`) |
-| GET | `/api/versions/{vid}/bundle` | `VersionBundle`: versão + arquivos a baixar (os mesmos do zip), por hash |
-| POST | `/api/blobs/missing` | `MissingBlobsRequest` → `MissingBlobsResponse` |
-| PUT | `/api/blobs/{hash}` | corpo cru → `BlobUploaded` |
-| GET | `/api/blobs/{hash}` | bytes (cache imutável) |
-| GET | `/api/skeletons` | `Vec<SkeletonDto>` (qualquer usuário logado) |
-| POST | `/api/skeletons` | admin: `CreateSkeletonRequest` → `SkeletonDto` |
-| PATCH/DELETE | `/api/skeletons/{id}` | admin: `UpdateSkeletonRequest` → `SkeletonDto` / 204 |
-| POST | `/api/skeletons/{id}/reprocess` | admin: reprocessa as heads que usam o esqueleto → `ReprocessQueued` |
-| GET | `/api/jobs?status=` | admin: `Vec<JobDto>` |
-| POST | `/api/admin/gc?grace_hours=24` | admin: apaga blobs não referenciados |
-| GET | `/api/tokens` | `Vec<ApiTokenDto>` do usuário |
-| DELETE | `/api/tokens/{id}` | revoga um token → 204 |
-| DELETE | `/api/tokens/current` | o plugin revoga o próprio token (ao desconectar) → 204 |
-| POST | `/api/devices/pair` | público: `PairStartRequest` → `PairStartResponse` |
-| POST | `/api/devices/pair/poll` | público: `PairPollRequest` → `PairPollResponse` (token uma única vez) |
-| GET | `/api/devices/pair/{code}` | `PairInfo` do pareamento pendente |
-| POST | `/api/devices/pair/{code}` | `PairDecision` → 204 |
-| GET | `/api/bridge/events?app=&name=&detail=` | stream SSE do editor: `hello` (`BridgeHello`), `import` (`BridgeImport`) |
-| GET | `/api/bridge/clients` | `Vec<BridgeClientDto>`: editores do usuário conectados agora |
-| POST | `/api/bridge/send` | `BridgeSendRequest` → `DeliveryDto` |
-| GET/POST | `/api/bridge/deliveries/{id}` | `DeliveryDto` / o editor informa o progresso (`DeliveryUpdate`) |
+| GET | `/api/users` | admin · `Vec<UserDto>` |
+| POST | `/api/users` | admin · `CreateUserRequest` → `UserDto` |
 
-Erros: status HTTP + corpo texto (`KnownWebError` do summer-web).
+### Projects & members
+
+| method | path | body → response |
+|---|---|---|
+| GET | `/api/projects` | `Vec<ProjectDto>` (projects the user is a member of; all for admins) |
+| POST | `/api/projects` | `CreateProjectRequest` → `ProjectDto` (creator becomes owner) |
+| GET | `/api/projects/{pid}` | `ProjectDto` |
+| GET | `/api/projects/{pid}/members` | `Vec<MemberDto>` |
+| POST | `/api/projects/{pid}/members` | owner · `AddMemberRequest` → `MemberDto` |
+| DELETE | `/api/projects/{pid}/members/{uid}` | owner · 204 |
+
+### Assets
+
+| method | path | body → response |
+|---|---|---|
+| GET | `/api/projects/{pid}/assets?q=&kind=&tag=&page=&size=` | `Page<AssetSummary>` |
+| POST | `/api/projects/{pid}/assets` | editor · `CreateAssetRequest` → `AssetDetail` |
+| GET | `/api/assets/{aid}` | `AssetDetail` |
+| PATCH | `/api/assets/{aid}` | editor · `UpdateAssetRequest` → `AssetDetail` (also changes the head) |
+| DELETE | `/api/assets/{aid}` | owner · 204 |
+
+### Versions
+
+| method | path | body → response |
+|---|---|---|
+| GET | `/api/assets/{aid}/versions` | `Vec<VersionDto>` (newest first) |
+| POST | `/api/assets/{aid}/versions` | editor · `CommitVersionRequest` → `VersionDto` (enqueues processing) |
+| GET | `/api/versions/{vid}` | `VersionDto` (includes the `PreviewManifest`) |
+| GET | `/api/versions/{vid}/diff?against=` | `VersionDiff` (added / removed / modified / unchanged) |
+| POST | `/api/versions/{vid}/reprocess` | editor · `VersionDto` (re-queues the processing job) |
+
+### Files & downloads
+
+| method | path | body → response |
+|---|---|---|
+| GET | `/api/versions/{vid}/files` | `Vec<FileEntry>` (the version's tree) |
+| GET | `/api/versions/{vid}/raw/{*path}` | file bytes (`?download=1` forces an attachment) |
+| GET | `/api/versions/{vid}/archive` | zip of the tree (+ texture-set images in use, under `@slug/`) |
+| GET | `/api/versions/{vid}/bundle` | `VersionBundle`: version + files to download (same as the zip), by hash |
+
+### Blobs
+
+| method | path | body → response |
+|---|---|---|
+| POST | `/api/blobs/missing` | `MissingBlobsRequest` → `MissingBlobsResponse` (hashes the server doesn't have yet) |
+| PUT | `/api/blobs/{hash}` | raw body (streamed, re-hashed, rejected on mismatch) → `BlobUploaded` |
+| GET | `/api/blobs/{hash}` | bytes (immutable cache; the hash acts as a capability) |
+
+### Reference skeletons
+
+| method | path | body → response |
+|---|---|---|
+| GET | `/api/skeletons` | `Vec<SkeletonDto>` (any logged-in user) |
+| POST | `/api/skeletons` | admin · `CreateSkeletonRequest` → `SkeletonDto` |
+| PATCH | `/api/skeletons/{id}` | admin · `UpdateSkeletonRequest` → `SkeletonDto` |
+| DELETE | `/api/skeletons/{id}` | admin · 204 |
+| POST | `/api/skeletons/{id}/reprocess` | admin · re-queues the heads that use the skeleton → `ReprocessQueued` |
+
+### Access tokens
+
+| method | path | body → response |
+|---|---|---|
+| GET | `/api/tokens` | `Vec<ApiTokenDto>` of the current user |
+| DELETE | `/api/tokens/{id}` | revokes a token → 204 |
+| DELETE | `/api/tokens/current` | the plugin revokes its own token (on disconnect) → 204 |
+
+### Device pairing
+
+Device flow used by editor plugins; see "Editor plugins".
+
+| method | path | body → response |
+|---|---|---|
+| POST | `/api/devices/pair` | **public** · `PairStartRequest` → `PairStartResponse` (device code + user code) |
+| POST | `/api/devices/pair/poll` | **public** · `PairPollRequest` → `PairPollResponse` (the token, exactly once) |
+| GET | `/api/devices/pair/{code}` | `PairInfo` of the pending pairing (shown on `/dispositivos`) |
+| POST | `/api/devices/pair/{code}` | `PairDecision` (approve / deny) → 204 |
+
+### Editor bridge
+
+| method | path | body → response |
+|---|---|---|
+| GET | `/api/bridge/events?app=&name=&detail=` | the editor's SSE stream: `hello` (`BridgeHello`), `import` (`BridgeImport`); comment every 15 s |
+| GET | `/api/bridge/clients` | `Vec<BridgeClientDto>`: the user's editors connected right now |
+| POST | `/api/bridge/send` | `BridgeSendRequest` → `DeliveryDto` |
+| GET | `/api/bridge/deliveries/{id}` | `DeliveryDto` (the page follows progress) |
+| POST | `/api/bridge/deliveries/{id}` | the editor reports progress (`DeliveryUpdate`) → `DeliveryDto` |
+
+### Administration
+
+| method | path | body → response |
+|---|---|---|
+| GET | `/api/jobs?status=` | admin · `Vec<JobDto>` |
+| POST | `/api/admin/gc?grace_hours=24` | admin · deletes unreferenced blobs (grace period protects in-flight uploads) |

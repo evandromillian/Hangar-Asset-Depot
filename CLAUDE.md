@@ -9,7 +9,7 @@ written entirely in Rust. Core ideas: git-like **versioning per asset** over a *
 blob store**, a background **processing pipeline** (FBX/glTF/OBJ → web GLB per LOD, texture
 variants, thumbnails) and a **browser 3D viewer** (Leptos UI + embedded Bevy).
 
-Full design, data model and REST table: `docs/ARCHITECTURE.md` (Portuguese). Read it before
+Full design, data model and REST API (grouped by area): `docs/ARCHITECTURE.md`. Read it before
 changing the data model, the API or the pipeline output.
 
 ## Workspace layout
