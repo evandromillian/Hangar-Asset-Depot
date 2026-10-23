@@ -31,6 +31,29 @@ pub fn normalize(path: &str) -> Option<String> {
     if out.is_empty() { None } else { Some(out.join("/")) }
 }
 
+/// Resolves a reference written inside a version file (`rel`, relative to the
+/// file's directory `base_dir`) to a version path. Unlike [`normalize`], `..`
+/// is allowed while it stays inside the version (`Models/../Textures/a.png`);
+/// absolute paths, drives, URI schemes (`file:`) and climbing above the root
+/// give `None`, so a model can't make the worker read files outside its version.
+pub fn join_within(base_dir: &str, rel: &str) -> Option<String> {
+    let rel = rel.replace('\\', "/");
+    if rel.starts_with('/') || rel.contains(':') || rel.chars().any(|c| c.is_control()) {
+        return None;
+    }
+    let mut out: Vec<&str> = Vec::new();
+    for seg in base_dir.split('/').chain(rel.split('/')) {
+        match seg {
+            "" | "." => {}
+            ".." => {
+                out.pop()?;
+            }
+            s => out.push(s),
+        }
+    }
+    if out.is_empty() { None } else { Some(out.join("/")) }
+}
+
 /// Last path segment.
 pub fn file_name(path: &str) -> &str {
     path.rsplit(['/', '\\']).next().unwrap_or(path)
@@ -80,28 +103,41 @@ pub fn is_audio(path: &str) -> bool {
 
 /// Best-effort MIME type from the extension.
 pub fn mime_for(path: &str) -> &'static str {
-    match extension(path).as_str() {
-        "png" => "image/png",
-        "jpg" | "jpeg" => "image/jpeg",
-        "webp" => "image/webp",
-        "tga" => "image/x-tga",
-        "bmp" => "image/bmp",
-        "tif" | "tiff" => "image/tiff",
-        "ktx2" => "image/ktx2",
-        "glb" => "model/gltf-binary",
-        "gltf" => "model/gltf+json",
-        "obj" => "model/obj",
-        "fbx" => "application/octet-stream",
-        "wav" => "audio/wav",
-        "ogg" | "opus" => "audio/ogg",
-        "mp3" => "audio/mpeg",
-        "flac" => "audio/flac",
-        "json" => "application/json",
-        "txt" | "md" => "text/plain; charset=utf-8",
-        "pdf" => "application/pdf",
-        "zip" => "application/zip",
-        _ => "application/octet-stream",
-    }
+    let ext = extension(path);
+    MIME_TYPES
+        .iter()
+        .find(|(exts, _)| exts.contains(&ext.as_str()))
+        .map_or("application/octet-stream", |(_, mime)| mime)
+}
+
+/// Extension → MIME type. None of them is rendered as a document that can run
+/// script (no HTML, SVG or XML), which is why blobs are only served with these.
+const MIME_TYPES: &[(&[&str], &str)] = &[
+    (&["png"], "image/png"),
+    (&["jpg", "jpeg"], "image/jpeg"),
+    (&["webp"], "image/webp"),
+    (&["tga"], "image/x-tga"),
+    (&["bmp"], "image/bmp"),
+    (&["tif", "tiff"], "image/tiff"),
+    (&["ktx2"], "image/ktx2"),
+    (&["glb"], "model/gltf-binary"),
+    (&["gltf"], "model/gltf+json"),
+    (&["obj"], "model/obj"),
+    (&["wav"], "audio/wav"),
+    (&["ogg", "opus"], "audio/ogg"),
+    (&["mp3"], "audio/mpeg"),
+    (&["flac"], "audio/flac"),
+    (&["json"], "application/json"),
+    (&["txt", "md"], "text/plain; charset=utf-8"),
+    (&["pdf"], "application/pdf"),
+    (&["zip"], "application/zip"),
+];
+
+/// Whether a client-declared MIME type may be stored and served for a blob:
+/// only types [`mime_for`] produces. An uploaded `text/html` or `image/svg+xml`
+/// served from the site's origin would be stored XSS.
+pub fn is_served_mime(mime: &str) -> bool {
+    MIME_TYPES.iter().any(|(_, m)| m.eq_ignore_ascii_case(mime.trim()))
 }
 
 #[cfg(test)]
@@ -129,5 +165,30 @@ mod tests {
         assert_eq!(parent("c.png"), "");
         assert!(is_model("x.Fbx"));
         assert!(is_image("x.TGA"));
+    }
+
+    #[test]
+    fn joins_within_the_version() {
+        assert_eq!(join_within("Models", "../Textures/a.png").as_deref(), Some("Textures/a.png"));
+        assert_eq!(join_within("Models", "tank.bin").as_deref(), Some("Models/tank.bin"));
+        assert_eq!(join_within("", r"sub\.\x.bin").as_deref(), Some("sub/x.bin"));
+        assert_eq!(join_within("Models", "../../etc/passwd"), None);
+        assert_eq!(join_within("", "../x.bin"), None);
+        assert_eq!(join_within("Models", "/etc/passwd"), None);
+        assert_eq!(join_within("Models", r"\Windows\win.ini"), None);
+        assert_eq!(join_within("Models", "C:/x.bin"), None);
+        assert_eq!(join_within("Models", "file:///dev/zero"), None);
+        assert_eq!(join_within("Models", ".."), None);
+    }
+
+    #[test]
+    fn served_mime_types() {
+        assert_eq!(mime_for("a/T.PNG"), "image/png");
+        assert_eq!(mime_for("a.fbx"), "application/octet-stream");
+        assert!(is_served_mime("image/png"));
+        assert!(is_served_mime("Model/GLTF-Binary"));
+        assert!(!is_served_mime("text/html"));
+        assert!(!is_served_mime("image/svg+xml"));
+        assert!(!is_served_mime("text/plain"));
     }
 }

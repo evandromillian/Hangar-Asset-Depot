@@ -35,9 +35,18 @@ pub fn DetailsPanel(asset: Signal<Option<AssetDetail>>, version: Signal<Option<V
                                         .into_iter()
                                         .filter_map(|(k, v)| v.map(|v| view! { <dt>{k}</dt><dd>{v}</dd> }))
                                         .collect_view()}
-                                    {s.url.clone().map(|u| view! {
-                                        <dt>"URL"</dt>
-                                        <dd><a href=u.clone() target="_blank" rel="noopener noreferrer">{u.clone()}</a></dd>
+                                    {s.url.clone().map(|u| {
+                                        // Never a `javascript:` / `data:` href, even for URLs stored before the server checked them.
+                                        let link = s.web_url().map(str::to_string);
+                                        view! {
+                                            <dt>"URL"</dt>
+                                            <dd>
+                                                {match link {
+                                                    Some(href) => view! { <a href=href target="_blank" rel="noopener noreferrer">{u}</a> }.into_any(),
+                                                    None => view! { <span class="mono">{u}</span> }.into_any(),
+                                                }}
+                                            </dd>
+                                        }
                                     })}
                                     <dt>"Criado"</dt>
                                     <dd>{fmt_datetime(&a.created_at)} {a.created_by.map(|c| format!(" · {c}"))}</dd>

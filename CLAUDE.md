@@ -79,9 +79,15 @@ prepared statements. Add `?sslmode=require`.
   `#[auto_config(WebConfigurator)]`. A new route module must be declared in `routes/mod.rs`.
   axum 0.8 path syntax: `{id}`, `{*path}`.
 - **Auth**: sa-token path rules in `main.rs` (`/api/**` protected, a few public exclusions).
-  Token comes from cookie `hangar_token` (HttpOnly, set on login), `Authorization: Bearer`, or query.
+  Token comes from cookie `hangar_token` (HttpOnly, set on login) or `Authorization: Bearer`
+  (`?hangar_token=` in the URL is refused by `security::layer`).
   Handlers take `CurrentUser` (`auth.rs`); the layer stores the login id (user UUID) as a `String`
   request extension and the `TokenValue` as another extension.
+- **Browser security** (`security.rs`, outermost layer): cross-site POST/PUT/PATCH/DELETE on
+  `/api/` → 403 (`Sec-Fetch-Site`, else `Origin` vs `Host`; non-browser clients send neither),
+  security headers everywhere, sandbox CSP on `/api/`, hash-based CSP on the SPA. Never serve a
+  blob with a client-declared MIME type outside `paths::is_served_mime`; never render a
+  user-supplied URL as `href` without `AssetSource::web_url`-style scheme checks.
 - **Authorization**: always go through `access::{project, asset, version}(db, &user, id, Need::…)`.
   Non-members get **404** (don't leak existence); insufficient role → 403. Global admins act as owner.
 - **Errors**: return `crate::error::Result<T>` (summer-web `WebError`). Use the helpers
@@ -172,6 +178,10 @@ prepared statements. Add `?sslmode=require`.
   `PreviewManifest::texture_set_files` = the set images the materials/variants use: the
   Arquivos tab lists them (downloaded from the set's version) and the version zip adds them
   under `@slug/` (skipped when the user can no longer read the set).
+- Model files are untrusted: a reference inside one (glTF buffer/image URI, OBJ `mtllib`) is
+  resolved with `hangar_core::paths::join_within` against the version root, never joined raw
+  onto the filesystem (`file:///etc/passwd`, `../../x`, `/dev/zero`). The `gltf` crate and
+  tobj don't check this themselves.
 - Recoverable problems go to `manifest.warnings`, not errors. Fail only when nothing can be previewed.
 - Heuristics (texture resolution, slot tokens, variant detection, LOD suffixes) are unit-tested in
   their modules; extend those tests when changing them.

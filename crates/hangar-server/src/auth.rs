@@ -2,19 +2,56 @@
 
 use crate::config::HangarConfig;
 use crate::entities::users;
-use crate::error::{Ctx, Result, bad_request, conflict, forbidden, unauthorized};
+use crate::error::{Ctx, KnownWebError, Result, bad_request, conflict, forbidden, unauthorized};
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString, rand_core::OsRng};
 use argon2::Argon2;
 use hangar_core::{CreateUserRequest, LoginRequest, LoginResponse, RegisterRequest, SetupStatus, UserDto};
 use sea_orm::{ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, PaginatorTrait, QueryFilter, QueryOrder, Set};
+use std::collections::HashMap;
+use std::sync::{LazyLock, Mutex};
+use std::time::{Duration, Instant};
 use summer_sa_token::sa_token_plugin_axum::{StpUtil, TokenValue};
 use summer_web::axum::http::{HeaderMap, HeaderValue, StatusCode, header, request::Parts};
 use summer_web::axum::response::IntoResponse;
 use summer_web::extractor::{Component, Config, Extension, FromRequestParts, Json, RequestPartsExt};
 use summer_web::{get, post};
+use tokio::sync::Semaphore;
 use uuid::Uuid;
 
 pub const COOKIE_NAME: &str = "hangar_token";
+
+/// Failed logins of a user name allowed per window before it is throttled.
+/// Keyed by name, not address: behind a reverse proxy every peer looks the same.
+const MAX_FAILURES: u32 = 10;
+const FAILURE_WINDOW: Duration = Duration::from_secs(15 * 60);
+const MAX_PASSWORD_BYTES: usize = 256;
+
+/// user name → (window start, failures).
+static FAILURES: LazyLock<Mutex<HashMap<String, (Instant, u32)>>> = LazyLock::new(Mutex::default);
+
+/// Argon2 is memory- and CPU-hard on purpose; bounding how many run at once
+/// keeps a flood of logins from exhausting the server.
+static HASHING: Semaphore = Semaphore::const_new(4);
+
+fn throttled(username: &str) -> bool {
+    let map = FAILURES.lock().unwrap();
+    map.get(username).is_some_and(|(start, n)| start.elapsed() < FAILURE_WINDOW && *n >= MAX_FAILURES)
+}
+
+fn record_failure(username: &str) {
+    let mut map = FAILURES.lock().unwrap();
+    if map.len() > 10_000 {
+        map.retain(|_, (start, _)| start.elapsed() < FAILURE_WINDOW);
+    }
+    let entry = map.entry(username.to_string()).or_insert((Instant::now(), 0));
+    if entry.0.elapsed() >= FAILURE_WINDOW {
+        *entry = (Instant::now(), 0);
+    }
+    entry.1 += 1;
+    if entry.1 == MAX_FAILURES {
+        tracing::warn!(username, "login throttled after repeated failures");
+    }
+}
 
 /// The logged-in user, loaded from the database. Rejects with 401.
 #[derive(Clone, Debug)]
@@ -48,6 +85,7 @@ impl CurrentUser {
 }
 
 pub async fn hash_password(password: String) -> Result<String> {
+    let _permit = HASHING.acquire().await.ctx("hash permit")?;
     tokio::task::spawn_blocking(move || {
         let salt = SaltString::generate(&mut OsRng);
         Argon2::default()
@@ -61,6 +99,7 @@ pub async fn hash_password(password: String) -> Result<String> {
 }
 
 pub async fn verify_password(password: String, hash: String) -> bool {
+    let Ok(_permit) = HASHING.acquire().await else { return false };
     tokio::task::spawn_blocking(move || {
         PasswordHash::new(&hash)
             .map(|parsed| Argon2::default().verify_password(password.as_bytes(), &parsed).is_ok())
@@ -78,6 +117,9 @@ fn validate_credentials(username: &str, password: &str) -> Result<()> {
     }
     if password.chars().count() < 8 {
         return Err(bad_request("a senha precisa ter pelo menos 8 caracteres"));
+    }
+    if password.len() > MAX_PASSWORD_BYTES {
+        return Err(bad_request(format!("a senha pode ter no máximo {MAX_PASSWORD_BYTES} caracteres")));
     }
     Ok(())
 }
@@ -102,7 +144,10 @@ pub async fn create_user(
     let model = users::ActiveModel {
         id: Set(Uuid::now_v7()),
         username: Set(username.clone()),
-        display_name: Set(display_name.filter(|d| !d.trim().is_empty()).unwrap_or(username)),
+        display_name: Set(display_name
+            .map(|d| d.trim().chars().filter(|c| !c.is_control()).take(80).collect::<String>())
+            .filter(|d| !d.is_empty())
+            .unwrap_or(username)),
         password_hash: Set(hash_password(password).await?),
         is_admin: Set(is_admin),
         created_at: Set(chrono::Utc::now()),
@@ -110,9 +155,11 @@ pub async fn create_user(
     model.insert(db).await.ctx("insert user")
 }
 
-fn session_cookie(token: &str, cfg: &HangarConfig) -> HeaderValue {
+/// The session cookie (`max_age` 0 clears it). SameSite=Lax keeps it off
+/// cross-site subrequests; `security::layer` also refuses cross-site writes.
+fn session_cookie(token: &str, max_age: i64, cfg: &HangarConfig) -> HeaderValue {
     let secure = if cfg.cookie_secure { "; Secure" } else { "" };
-    let v = format!("{COOKIE_NAME}={token}; Path=/; HttpOnly; SameSite=Lax; Max-Age={}{secure}", cfg.session_ttl);
+    let v = format!("{COOKIE_NAME}={token}; Path=/; HttpOnly; SameSite=Lax; Max-Age={max_age}{secure}");
     HeaderValue::from_str(&v).expect("valid cookie header")
 }
 
@@ -121,7 +168,7 @@ async fn start_session(user: &users::Model, cfg: &HangarConfig) -> Result<(Heade
         .await
         .map_err(|e| anyhow::anyhow!("sa-token login: {e}"))?;
     let mut headers = HeaderMap::new();
-    headers.insert(header::SET_COOKIE, session_cookie(token.as_str(), cfg));
+    headers.insert(header::SET_COOKIE, session_cookie(token.as_str(), cfg.session_ttl, cfg));
     Ok((headers, Json(LoginResponse { token: token.as_str().to_string(), user: user.to_dto() })))
 }
 
@@ -166,6 +213,17 @@ async fn login(
     Json(req): Json<LoginRequest>,
 ) -> Result<impl IntoResponse> {
     let username = req.username.trim().to_lowercase();
+    if throttled(&username) {
+        return Err(KnownWebError::new(
+            StatusCode::TOO_MANY_REQUESTS,
+            "muitas tentativas de login: aguarde alguns minutos e tente de novo",
+        )
+        .into());
+    }
+    if req.password.len() > MAX_PASSWORD_BYTES {
+        record_failure(&username);
+        return Err(unauthorized("usuário ou senha inválidos"));
+    }
     let user = users::Entity::find()
         .filter(users::Column::Username.eq(&username))
         .one(&db)
@@ -178,21 +236,24 @@ async fn login(
     };
     let ok = verify_password(req.password, hash).await;
     match (ok, user) {
-        (true, Some(user)) => start_session(&user, &cfg).await,
-        _ => Err(unauthorized("usuário ou senha inválidos")),
+        (true, Some(user)) => {
+            FAILURES.lock().unwrap().remove(&username);
+            start_session(&user, &cfg).await
+        }
+        _ => {
+            record_failure(&username);
+            Err(unauthorized("usuário ou senha inválidos"))
+        }
     }
 }
 
 #[post("/api/auth/logout")]
-async fn logout(token: Option<Extension<TokenValue>>) -> Result<impl IntoResponse> {
+async fn logout(Config(cfg): Config<HangarConfig>, token: Option<Extension<TokenValue>>) -> Result<impl IntoResponse> {
     if let Some(Extension(token)) = token {
         let _ = StpUtil::logout(&token).await;
     }
     let mut headers = HeaderMap::new();
-    headers.insert(
-        header::SET_COOKIE,
-        HeaderValue::from_static("hangar_token=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0"),
-    );
+    headers.insert(header::SET_COOKIE, session_cookie("", 0, &cfg));
     Ok((StatusCode::NO_CONTENT, headers))
 }
 

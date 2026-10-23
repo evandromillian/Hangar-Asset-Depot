@@ -2,7 +2,7 @@ use crate::auth::CurrentUser;
 use crate::entities::project_members;
 use crate::error::{Result, forbidden, not_found};
 use crate::storage::BlobStore;
-use hangar_core::{BlobUploaded, MissingBlobsRequest, MissingBlobsResponse};
+use hangar_core::{BlobUploaded, MissingBlobsRequest, MissingBlobsResponse, paths};
 use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, PaginatorTrait, QueryFilter};
 use summer_web::axum::body::Body;
 use summer_web::axum::http::{HeaderMap, HeaderValue, StatusCode, header};
@@ -46,10 +46,14 @@ async fn put_blob(
     body: Body,
 ) -> Result<(StatusCode, Json<BlobUploaded>)> {
     require_uploader(&db, &user).await?;
+    if let Some(len) = headers.get(header::CONTENT_LENGTH).and_then(|v| v.to_str().ok()?.parse().ok()) {
+        store.check_upload_size(len)?;
+    }
+    // Blobs are served with this type, from our origin: only harmless ones are kept.
     let mime = headers
         .get(header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
-        .filter(|m| !m.is_empty() && *m != "application/octet-stream")
+        .filter(|m| paths::is_served_mime(m))
         .map(str::to_string);
     let res = store.put_stream(&hash, mime, body.into_data_stream()).await?;
     let status = if res.created { StatusCode::CREATED } else { StatusCode::OK };
@@ -73,11 +77,14 @@ async fn get_blob(
     }
     let stream = store.stream(&blob.hash).await?;
     let mut headers = HeaderMap::new();
-    let mime = blob.mime.as_deref().unwrap_or("application/octet-stream");
-    headers.insert(
-        header::CONTENT_TYPE,
-        HeaderValue::from_str(mime).unwrap_or(HeaderValue::from_static("application/octet-stream")),
-    );
+    // Rows stored before uploads were filtered may hold any client-sent type.
+    match blob.mime.as_deref().filter(|m| paths::is_served_mime(m)).and_then(|m| HeaderValue::from_str(m).ok()) {
+        Some(mime) => headers.insert(header::CONTENT_TYPE, mime),
+        None => {
+            headers.insert(header::CONTENT_DISPOSITION, HeaderValue::from_static("attachment"));
+            headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("application/octet-stream"))
+        }
+    };
     headers.insert(header::CONTENT_LENGTH, HeaderValue::from(blob.size as u64));
     headers.insert(header::CACHE_CONTROL, cache);
     headers.insert(header::ETAG, HeaderValue::from_str(&etag).expect("hex etag"));

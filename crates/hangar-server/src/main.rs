@@ -11,6 +11,7 @@ mod entities;
 mod error;
 mod jobs;
 mod routes;
+mod security;
 mod storage;
 mod tokens;
 
@@ -41,7 +42,8 @@ impl Plugin for HangarPlugin {
 
         db::migrate(&db).await.expect("database migration failed");
 
-        let store = BlobStore::new(op, db.clone(), cfg.temp_root().join("hangar-uploads"));
+        let sec = security::Security { hsts: cfg.cookie_secure };
+        let store = BlobStore::new(op, db.clone(), cfg.temp_root().join("hangar-uploads"), cfg.max_upload_size);
         let queue = JobQueue::new(db.clone());
         let worker = WorkerCtx {
             db: db.clone(),
@@ -55,6 +57,10 @@ impl Plugin for HangarPlugin {
         let layer_tokens = api_tokens.clone();
         app.add_router_layer(move |router| {
             router.layer(summer_web::axum::middleware::from_fn_with_state(layer_tokens.clone(), tokens::layer))
+        });
+        // Outermost: cross-site requests are refused before any auth work.
+        app.add_router_layer(move |router| {
+            router.layer(summer_web::axum::middleware::from_fn_with_state(sec.clone(), security::layer))
         });
         app.add_component(api_tokens);
         app.add_component(bridge::BridgeHub::default());

@@ -77,7 +77,8 @@ async fn gc_blobs(
     Query(q): Query<GcQuery>,
 ) -> Result<Json<GcResult>> {
     user.require_admin()?;
-    let (deleted, freed_bytes) = store.gc(q.grace_hours.unwrap_or(24).max(0)).await?;
+    // Bounded so the cast to SQL int can't wrap into a negative grace (= delete in-flight uploads).
+    let (deleted, freed_bytes) = store.gc(q.grace_hours.unwrap_or(24).clamp(0, 24 * 365 * 10)).await?;
     tracing::info!(deleted, freed_bytes, "blob gc finished");
     Ok(Json(GcResult { deleted, freed_bytes }))
 }

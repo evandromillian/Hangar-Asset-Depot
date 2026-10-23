@@ -25,7 +25,8 @@ pub fn load(path: &Path, base_dir: &str, cfg: &PipelineConfig) -> Result<Scene> 
     let _ = std::fs::remove_file(&out_glb);
 
     let mut cmd = Command::new(blender);
-    cmd.arg("--background").arg("--factory-startup").arg("--python-exit-code").arg("3");
+    // Uploaded .blend files are untrusted: never run their embedded scripts / drivers.
+    cmd.arg("--background").arg("--factory-startup").arg("--disable-autoexec").arg("--python-exit-code").arg("3");
     cmd.arg("--python").arg(script).arg("--").arg(path).arg(&out_glb);
     let log_path = out_glb.with_extension("log");
     let log = std::fs::File::create(&log_path)?;

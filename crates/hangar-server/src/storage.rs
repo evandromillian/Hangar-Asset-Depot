@@ -5,13 +5,14 @@
 //! crashed upload never becomes visible.
 
 use crate::entities::blobs;
-use crate::error::{Ctx, Result, bad_request, not_found};
+use crate::error::{Ctx, KnownWebError, Result, bad_request, not_found};
 use bytes::Bytes;
 use futures::{Stream, StreamExt};
 use hangar_core::{BlobUploaded, is_valid_hash};
 use opendal::Operator;
 use sea_orm::{ColumnTrait, ConnectionTrait, DatabaseConnection, DbBackend, EntityTrait, QueryFilter, Statement};
 use std::path::{Path, PathBuf};
+use summer_web::axum::http::StatusCode;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 const CHUNK: usize = 8 * 1024 * 1024;
@@ -21,6 +22,8 @@ pub struct BlobStore {
     op: Operator,
     db: DatabaseConnection,
     tmp: PathBuf,
+    /// Largest upload in bytes (0 = no limit).
+    max_upload: u64,
 }
 
 pub fn key(hash: &str) -> String {
@@ -28,8 +31,20 @@ pub fn key(hash: &str) -> String {
 }
 
 impl BlobStore {
-    pub fn new(op: Operator, db: DatabaseConnection, tmp: PathBuf) -> Self {
-        Self { op, db, tmp }
+    pub fn new(op: Operator, db: DatabaseConnection, tmp: PathBuf, max_upload: u64) -> Self {
+        Self { op, db, tmp, max_upload }
+    }
+
+    /// Rejects an upload of `size` bytes over the configured limit.
+    pub fn check_upload_size(&self, size: u64) -> Result<()> {
+        if self.max_upload > 0 && size > self.max_upload {
+            return Err(KnownWebError::new(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                format!("arquivo maior que o limite de {} MB", self.max_upload >> 20),
+            )
+            .into());
+        }
+        Ok(())
     }
 
     pub fn temp_dir(&self) -> &Path {
@@ -87,6 +102,7 @@ impl BlobStore {
             let chunk = chunk.map_err(|e| bad_request(format!("upload interrompido: {e}")))?;
             hasher.update(&chunk);
             size += chunk.len() as u64;
+            self.check_upload_size(size)?;
             file.write_all(&chunk).await.ctx("write temp file")?;
         }
         file.flush().await.ctx("flush temp file")?;

@@ -2,11 +2,21 @@
 
 use crate::scene::{Material, MeshPrim, Scene, TexRef, TexSource};
 use anyhow::{anyhow, Result};
-use hangar_core::TextureSlot;
+use hangar_core::{TextureSlot, paths};
 use std::path::Path;
 
 pub fn load(path: &Path, base_dir: &str) -> Result<Scene> {
-    let (models, materials) = tobj::load_obj(path, &tobj::GPU_LOAD_OPTIONS).map_err(|e| anyhow!("OBJ: {e}"))?;
+    let root = super::version_root(path, base_dir);
+    let mut reader = std::io::BufReader::new(std::fs::File::open(path)?);
+    // `mtllib` is resolved inside the version only: tobj's own loader joins it
+    // raw, so `mtllib /dev/zero` or `../../x` would read outside the version.
+    let (models, materials) = tobj::load_obj_buf(&mut reader, &tobj::GPU_LOAD_OPTIONS, |mtl| {
+        match paths::join_within(base_dir, &mtl.to_string_lossy()) {
+            Some(rel) => tobj::load_mtl(root.join(rel)),
+            None => Err(tobj::LoadError::OpenFileFailed),
+        }
+    })
+    .map_err(|e| anyhow!("OBJ: {e}"))?;
     let mut out = Scene { importer: "obj", ..Default::default() };
     let materials = match materials {
         Ok(m) => m,
@@ -102,4 +112,29 @@ fn convert_material(m: &tobj::Material, base_dir: &str) -> Material {
         crate::textures::detect_slot(p) == Some(TextureSlot::Occlusion)
     }));
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const QUAD: &str = "v 0 0 0\nv 1 0 0\nv 1 1 0\nusemtl Paint\nf 1 2 3\n";
+
+    #[test]
+    fn mtllib_stays_inside_the_version() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("v/Models")).unwrap();
+        std::fs::write(dir.path().join("outside.mtl"), "newmtl Stolen\n").unwrap();
+        std::fs::write(dir.path().join("v/inside.mtl"), "newmtl Paint\n").unwrap();
+        let model = dir.path().join("v/Models/m.obj");
+
+        std::fs::write(&model, format!("mtllib ../../outside.mtl\n{QUAD}")).unwrap();
+        let scene = load(&model, "Models").unwrap();
+        assert!(scene.materials.iter().all(|m| m.name != "Stolen"), "read a file outside the version");
+        assert!(scene.warnings.iter().any(|w| w.contains("MTL")));
+
+        std::fs::write(&model, format!("mtllib ../inside.mtl\n{QUAD}")).unwrap();
+        let scene = load(&model, "Models").unwrap();
+        assert!(scene.materials.iter().any(|m| m.name == "Paint"));
+    }
 }

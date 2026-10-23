@@ -5,7 +5,7 @@ use crate::entities::{asset_versions, assets};
 use crate::error::{Ctx, Result, bad_request, slugify};
 use crate::jobs::{JobQueue, requeue_texture_set_users};
 use hangar_core::{
-    AssetDetail, AssetKind, AssetQuery, AssetSummary, CreateAssetRequest, Page, UpdateAssetRequest, VersionBrief,
+    AssetDetail, AssetKind, AssetQuery, AssetSource, AssetSummary, CreateAssetRequest, Page, UpdateAssetRequest, VersionBrief,
     VersionDto,
 };
 use sea_orm::{
@@ -50,6 +50,15 @@ fn clean_tags(tags: Vec<String>) -> Vec<String> {
     out
 }
 
+/// The page renders `source.url` as a link: only http(s) ones are accepted.
+fn clean_source(mut s: AssetSource) -> Result<AssetSource> {
+    s.url = s.url.map(|u| u.trim().to_string()).filter(|u| !u.is_empty());
+    if s.url.is_some() && s.web_url().is_none() {
+        return Err(bad_request("a URL de origem precisa começar com http:// ou https://"));
+    }
+    Ok(s)
+}
+
 #[get("/api/projects/{pid}/assets")]
 async fn list_assets(
     user: CurrentUser,
@@ -64,7 +73,8 @@ async fn list_assets(
     let mut where_sql = String::from("a.project_id = $1");
     let mut values: Vec<Value> = vec![pid.into()];
     if let Some(text) = q.q.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-        values.push(format!("%{}%", text.replace('%', "\\%").replace('_', "\\_")).into());
+        let escaped = text.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
+        values.push(format!("%{escaped}%").into());
         let n = values.len();
         where_sql.push_str(&format!(
             " AND (a.name ILIKE ${n} OR a.slug ILIKE ${n} OR a.description ILIKE ${n} OR a.tags::text ILIKE ${n})"
@@ -173,7 +183,7 @@ async fn create_asset(
         kind: Set(req.kind.as_str().into()),
         description: Set(req.description.trim().to_string()),
         tags: Set(serde_json::to_value(clean_tags(req.tags)).ctx("tags")?),
-        source: Set(serde_json::to_value(&req.source).ctx("source")?),
+        source: Set(serde_json::to_value(clean_source(req.source)?).ctx("source")?),
         head_version_id: Set(None),
         created_by: Set(Some(user.0.id)),
         created_at: Set(now),
@@ -225,7 +235,7 @@ async fn update_asset(
         m.tags = Set(serde_json::to_value(clean_tags(t)).ctx("tags")?);
     }
     if let Some(s) = req.source {
-        m.source = Set(serde_json::to_value(&s).ctx("source")?);
+        m.source = Set(serde_json::to_value(clean_source(s)?).ctx("source")?);
     }
     if let Some(h) = req.head_version_id {
         m.head_version_id = Set(Some(h));

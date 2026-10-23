@@ -15,6 +15,9 @@ pub struct HangarConfig {
     /// Session lifetime in seconds (must match `[sa-token] timeout`).
     #[serde(default = "default_session_ttl")]
     pub session_ttl: i64,
+    /// Largest file accepted by `PUT /api/blobs/{hash}`, in bytes (0 = no limit).
+    #[serde(default = "default_max_upload_size")]
+    pub max_upload_size: u64,
     /// Number of concurrent processing workers.
     #[serde(default = "default_workers")]
     pub workers: usize,
@@ -36,6 +39,9 @@ pub struct HangarConfig {
 
 fn default_session_ttl() -> i64 {
     7 * 24 * 3600
+}
+fn default_max_upload_size() -> u64 {
+    16 << 30
 }
 fn default_workers() -> usize {
     1

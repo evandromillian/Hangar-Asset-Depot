@@ -11,6 +11,14 @@ use anyhow::{anyhow, Result};
 use hangar_core::paths;
 use std::path::{Path, PathBuf};
 
+/// The version root of a file at `path` whose version directory is `base_dir`
+/// (`root/Models/x.gltf` with "Models" → `root`). References inside model files
+/// are resolved against it with [`paths::join_within`], never joined raw.
+fn version_root<'a>(path: &'a Path, base_dir: &str) -> &'a Path {
+    let parent = path.parent().unwrap_or(Path::new("."));
+    base_dir.split('/').filter(|s| !s.is_empty()).fold(parent, |p, _| p.parent().unwrap_or(p))
+}
+
 /// Import a version file (`rel` relative to `root`). `anim_files` are
 /// (version path, file on disk) of FBX files holding animations for this model
 /// (FBX primaries only); they may live outside `root` (reference skeletons).

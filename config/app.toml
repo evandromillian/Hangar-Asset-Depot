@@ -41,8 +41,11 @@ token_style = "Random64"
 
 [hangar]
 allow_signup = false
+# true when served over HTTPS: marks the session cookie Secure and sends HSTS.
 cookie_secure = false
 session_ttl = 604800
+# Largest uploaded file in bytes (0 = no limit); 16 GiB.
+max_upload_size = 17179869184
 workers = 1
 # "auto" looks for `blender` on PATH; set an absolute path or "" to disable the fallback.
 blender_path = "${HANGAR_BLENDER:auto}"

@@ -178,6 +178,17 @@ async fn add_member(
         .await
         .ctx("load user")?
         .ok_or_else(|| not_found("usuário não encontrado"))?;
+    if req.role != Role::Owner {
+        let owners = project_members::Entity::find()
+            .filter(project_members::Column::ProjectId.eq(id))
+            .filter(project_members::Column::Role.eq("owner"))
+            .all(&db)
+            .await
+            .ctx("load owners")?;
+        if owners.len() == 1 && owners[0].user_id == target.id {
+            return Err(bad_request("o projeto precisa de pelo menos um owner"));
+        }
+    }
     db.execute_raw(Statement::from_sql_and_values(
         DbBackend::Postgres,
         "INSERT INTO project_members(project_id, user_id, role) VALUES ($1, $2, $3)

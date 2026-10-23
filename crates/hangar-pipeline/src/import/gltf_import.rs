@@ -10,13 +10,15 @@
 use crate::scene::{AlphaMode, AnimClip, Material, MeshPrim, NodeChannel, Rig, Scene, SceneNode, Skin, TexRef, TexSource};
 use anyhow::{anyhow, Context, Result};
 use glam::{Mat3, Mat4, Vec3};
-use hangar_core::TextureSlot;
+use hangar_core::{TextureSlot, paths};
 use std::path::Path;
 use std::sync::Arc;
 
 pub fn load(path: &Path, base_dir: &str, importer: &'static str) -> Result<Scene> {
     let gltf = gltf::Gltf::open(path).with_context(|| format!("open {}", path.display()))?;
     let parent = path.parent().unwrap_or(Path::new("."));
+    let root = super::version_root(path, base_dir);
+    check_buffer_uris(&gltf.document, base_dir)?;
     let buffers = gltf::import_buffers(&gltf.document, Some(parent), gltf.blob.clone())
         .map_err(|e| anyhow!("glTF buffers: {e}"))?;
     let doc = &gltf.document;
@@ -87,7 +89,7 @@ pub fn load(path: &Path, base_dir: &str, importer: &'static str) -> Result<Scene
             push(TextureSlot::Occlusion, occ);
             let gloss = sg.specular_glossiness_texture().and_then(|t| image_sources.get(t.texture().source().index()));
             if let Some(src) = gloss {
-                match roughness_from_gloss(src, parent, sg.glossiness_factor()) {
+                match roughness_from_gloss(src, root, sg.glossiness_factor()) {
                     Ok(bytes) => {
                         let name = format!("{}_roughness", src.display());
                         roughness = Some(TexRef { slot: TextureSlot::Roughness, source: TexSource::Embedded { name, bytes: Arc::new(bytes) } });
@@ -414,10 +416,13 @@ fn to_linear<const N: usize>(
 
 /// Roughness map (PNG) from a specular-glossiness texture: roughness = 1 −
 /// glossiness, glossiness being its alpha channel times `factor`.
-fn roughness_from_gloss(src: &TexSource, dir: &Path, factor: f32) -> Result<Vec<u8>> {
+fn roughness_from_gloss(src: &TexSource, root: &Path, factor: f32) -> Result<Vec<u8>> {
     let img = match src {
         TexSource::Embedded { bytes, .. } => image::load_from_memory(bytes)?,
-        TexSource::Path { original, .. } => image::open(dir.join(original))?,
+        TexSource::Path { original, base_dir } => {
+            let rel = paths::join_within(base_dir, original).ok_or_else(|| anyhow!("{original} is outside the version"))?;
+            image::open(root.join(rel))?
+        }
     };
     let mut rgba = img.to_rgba8();
     for p in rgba.pixels_mut() {
@@ -428,7 +433,29 @@ fn roughness_from_gloss(src: &TexSource, dir: &Path, factor: f32) -> Result<Vec<
     Ok(crate::images::encode_png(&rgba))
 }
 
+/// Every external buffer must be a file of the version: the `gltf` crate reads
+/// `file:` URIs and joins relative ones (`../../etc/passwd`) without checks, so
+/// a crafted model could make the worker read (or block on, `/dev/zero`) any
+/// file of the server. Its decoder also panics on non-UTF-8 escapes.
+fn check_buffer_uris(doc: &gltf::Document, base_dir: &str) -> Result<()> {
+    for buffer in doc.buffers() {
+        let gltf::buffer::Source::Uri(uri) = buffer.source() else { continue };
+        if uri.starts_with("data:") {
+            continue;
+        }
+        let decoded = String::from_utf8(percent_decode_bytes(uri)).ok();
+        if uri.contains(':') || decoded.and_then(|d| paths::join_within(base_dir, &d)).is_none() {
+            return Err(anyhow!("buffer {uri:?} is outside the version"));
+        }
+    }
+    Ok(())
+}
+
 pub fn percent_decode(s: &str) -> String {
+    String::from_utf8_lossy(&percent_decode_bytes(s)).into_owned()
+}
+
+fn percent_decode_bytes(s: &str) -> Vec<u8> {
     let bytes = s.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
@@ -444,7 +471,7 @@ pub fn percent_decode(s: &str) -> String {
         out.push(bytes[i]);
         i += 1;
     }
-    String::from_utf8_lossy(&out).into_owned()
+    out
 }
 
 pub fn base64_decode(s: &str) -> Vec<u8> {
@@ -484,5 +511,26 @@ mod tests {
         assert_eq!(percent_decode("100%"), "100%");
         assert_eq!(base64_decode("aGVsbG8="), b"hello");
         assert_eq!(base64_decode("aGk"), b"hi");
+    }
+
+    #[test]
+    fn buffers_stay_inside_the_version() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("secret.bin"), [0u8; 12]).unwrap();
+        std::fs::create_dir_all(dir.path().join("v/Models")).unwrap();
+        std::fs::write(dir.path().join("v/shared.bin"), [0u8; 12]).unwrap();
+        let gltf = |uri: &str| {
+            format!(r#"{{"asset":{{"version":"2.0"}},"buffers":[{{"uri":"{uri}","byteLength":12}}]}}"#)
+        };
+        let model = dir.path().join("v/Models/m.gltf");
+        for bad in ["../../secret.bin", "..%2F..%2Fsecret.bin", "file:///dev/zero", "/etc/passwd", "a%FF.bin"] {
+            std::fs::write(&model, gltf(bad)).unwrap();
+            let err = load(&model, "Models", "gltf").err().unwrap_or_else(|| panic!("{bad} was accepted"));
+            assert!(format!("{err:#}").contains("outside the version"), "{bad}: {err:#}");
+        }
+        // A reference inside the version gets past the buffers (and fails later: no scene).
+        std::fs::write(&model, gltf("../shared.bin")).unwrap();
+        let err = load(&model, "Models", "gltf").err().map(|e| format!("{e:#}")).unwrap_or_default();
+        assert!(!err.contains("outside the version") && !err.contains("buffers"), "{err}");
     }
 }

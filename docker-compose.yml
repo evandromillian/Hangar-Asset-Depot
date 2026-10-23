@@ -8,7 +8,8 @@ services:
       POSTGRES_USER: hangar
       POSTGRES_PASSWORD: hangar
       POSTGRES_DB: hangar
-    ports: ["5432:5432"]
+    # Loopback only: these default credentials must never be reachable from the network.
+    ports: ["127.0.0.1:5432:5432"]
     volumes: [pgdata:/var/lib/postgresql/data]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U hangar"]
@@ -22,7 +23,7 @@ services:
     environment:
       MINIO_ROOT_USER: hangar
       MINIO_ROOT_PASSWORD: hangar-secret
-    ports: ["9000:9000", "9001:9001"]
+    ports: ["127.0.0.1:9000:9000", "127.0.0.1:9001:9001"]
     volumes: [miniodata:/data]
 
 volumes:

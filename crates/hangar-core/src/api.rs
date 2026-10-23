@@ -104,6 +104,16 @@ pub struct AssetSource {
     pub notes: Option<String>,
 }
 
+impl AssetSource {
+    /// `url` when it is an http(s) link. The page renders it as a link, so a
+    /// `javascript:` or `data:` URL would run script when clicked.
+    pub fn web_url(&self) -> Option<&str> {
+        let url = self.url.as_deref()?.trim();
+        let scheme = url.split_once("://")?.0;
+        (scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("https")).then_some(url)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct VersionBrief {
     pub id: Uuid,

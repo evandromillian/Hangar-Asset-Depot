@@ -299,7 +299,19 @@ responses (the server sends a comment every 15 s).
 **Authentication:** cookie `hangar_token` (HttpOnly, set on login) or
 `Authorization: Bearer <token>` — either a session token or an `hgr_…` access token (plugins;
 see "Editor plugins"). Every `/api/**` route requires it except the ones marked
-**public** below.
+**public** below. Tokens in the query string (`?hangar_token=`) are refused (400): URLs leak
+into logs, history and `Referer`.
+
+**Browser protections** (`security.rs`, one layer around everything): state-changing `/api/`
+requests (POST/PUT/PATCH/DELETE) must come from the site itself — `Sec-Fetch-Site:
+same-origin`, or for older browsers an `Origin` matching `Host`; otherwise 403 (CSRF).
+Requests without either header (CLI, editor plugins) pass and authenticate with bearer tokens.
+Every response gets `nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: same-origin`,
+COOP/CORP `same-origin` (+ HSTS when `cookie_secure`). API responses carry `CSP: default-src
+'none'; sandbox`; the web client gets a strict CSP whose `script-src` allows its inline Trunk
+bootstrap by SHA-256, computed when the page is served. Blobs are stored and served only with
+the MIME types `paths::mime_for` produces (never HTML/SVG); anything else downloads as an
+attachment. Logins are throttled per user name (10 failures / 15 min → 429).
 
 **Authorization:** project-scoped routes check membership through `access::{project, asset,
 version}`. Non-members get **404** (existence isn't leaked); an insufficient role gets
