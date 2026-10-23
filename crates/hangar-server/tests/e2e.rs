@@ -225,8 +225,23 @@ fn full_workflow() {
     let _: LoginResponse = b.post("/api/auth/login", json!({"username": bob, "password": "senha-do-bob"}));
     let asset_path = format!("/api/assets/{}", asset.summary.id);
     assert_eq!(b.status_of(reqwest::Method::GET, &asset_path, None), 404);
+    // Blobs follow project membership too: knowing a hash is not enough, neither
+    // to download it nor to commit it into a project of one's own.
+    let thumb = blob_url(preview.thumbnail_hash.as_deref().unwrap());
+    assert_eq!(b.status_of(reqwest::Method::GET, &thumb, None), 404);
+    let own: ProjectDto = b.post("/api/projects", json!({"name": format!("Bob {tag}")}));
+    let own_asset: AssetDetail =
+        b.post(&format!("/api/projects/{}/assets", own.id), json!({"name": "Cópia", "kind": "model"}));
+    let license = [Upload { path: "LICENSE.txt", bytes: b"license".to_vec() }];
+    let copy = json!({"parent_id": null, "message": "x", "upserts": license.iter().map(Upload::entry).collect::<Vec<_>>()});
+    let copy_path = format!("/api/assets/{}/versions", own_asset.summary.id);
+    assert_eq!(b.status_of(reqwest::Method::POST, &copy_path, Some(copy.clone())), 400, "hash without the bytes");
+    let r = b.http.put(b.url(&format!("/api/blobs/{}", license[0].entry().hash))).body(license[0].bytes.clone()).send().unwrap();
+    assert_eq!(r.status().as_u16(), 200, "existing blob: verified, not stored again");
+    assert_eq!(b.status_of(reqwest::Method::POST, &copy_path, Some(copy)), 200, "the bytes prove possession");
     let _: MemberDto = s.post(&format!("/api/projects/{}/members", project.id), json!({"username": bob, "role": "viewer"}));
     assert_eq!(b.status_of(reqwest::Method::GET, &asset_path, None), 200);
+    assert_eq!(b.status_of(reqwest::Method::GET, &thumb, None), 200);
     let commit = json!({"parent_id": v1.id, "message": "x", "deletes": ["tank.mtl"]});
     assert_eq!(b.status_of(reqwest::Method::POST, &format!("{asset_path}/versions"), Some(commit)), 403);
 

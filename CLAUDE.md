@@ -98,6 +98,10 @@ prepared statements. Add `?sslmode=require`.
   The `blobs` row is inserted only after the object is fully written; uploads are re-hashed and
   rejected on mismatch. Blobs are immutable — never overwrite or mutate one. Unreferenced blobs are
   removed only by `POST /api/admin/gc` (24h grace for in-flight uploads).
+  Access is project-level (`access::unusable_blobs`): a blob is readable through a version file or
+  rendition of a project the user is a member of, or when they uploaded it (`blob_uploads`).
+  `GET /api/blobs/{hash}`, `/missing` and commit upserts all use it — never let a hash alone
+  pull another project's file in. A new client-facing blob reference needs the same check.
 - **Versions** (`routes/versions.rs`): immutable snapshots = file tree in `version_files` +
   `parent_id` (a DAG; branching allowed). Commit = parent tree (if `inherit`) − `deletes` + `upserts`.
   Numbering happens under an exclusive row lock on the asset. The processing job is enqueued **in the
@@ -222,5 +226,4 @@ prepared statements. Add `?sslmode=require`.
   repeated in every LOD GLB.
 - Blender fallback is implemented but was never run against a real Blender in CI.
 - The S3 storage backend is compiled in but only the `fs` backend has been exercised end-to-end.
-- Sessions are in memory by default (`--features redis-sessions` for Redis); blob downloads by hash
-  only require login (the hash acts as a capability).
+- Sessions are in memory by default (`--features redis-sessions` for Redis).

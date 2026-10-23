@@ -1,8 +1,9 @@
+use crate::access;
 use crate::auth::CurrentUser;
 use crate::entities::project_members;
 use crate::error::{Result, forbidden, not_found};
 use crate::storage::BlobStore;
-use hangar_core::{BlobUploaded, MissingBlobsRequest, MissingBlobsResponse, paths};
+use hangar_core::{BlobUploaded, MissingBlobsRequest, MissingBlobsResponse, is_valid_hash, paths};
 use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, PaginatorTrait, QueryFilter};
 use summer_web::axum::body::Body;
 use summer_web::axum::http::{HeaderMap, HeaderValue, StatusCode, header};
@@ -24,15 +25,16 @@ async fn require_uploader(db: &DatabaseConnection, user: &CurrentUser) -> Result
     if n == 0 { Err(forbidden("sem permissão de envio")) } else { Ok(()) }
 }
 
+/// Hashes the client must upload before committing them: the ones the user
+/// can't read yet, stored or not (so this doesn't reveal other projects' files).
 #[post("/api/blobs/missing")]
 async fn missing_blobs(
     user: CurrentUser,
     Component(db): Component<DatabaseConnection>,
-    Component(store): Component<BlobStore>,
     Json(req): Json<MissingBlobsRequest>,
 ) -> Result<Json<MissingBlobsResponse>> {
     require_uploader(&db, &user).await?;
-    Ok(Json(MissingBlobsResponse { missing: store.missing(&req.hashes).await? }))
+    Ok(Json(MissingBlobsResponse { missing: access::unusable_blobs(&db, &user, &req.hashes).await? }))
 }
 
 /// Raw body upload. The server re-hashes the stream and rejects mismatches.
@@ -55,18 +57,31 @@ async fn put_blob(
         .and_then(|v| v.to_str().ok())
         .filter(|m| paths::is_served_mime(m))
         .map(str::to_string);
+    // Already readable by this user: nothing to prove, skip the body.
+    if let Some(b) = store.get(&hash).await?
+        && access::unusable_blobs(&db, &user, std::slice::from_ref(&hash)).await?.is_empty()
+    {
+        return Ok((StatusCode::OK, Json(BlobUploaded { hash: b.hash, size: b.size, created: false })));
+    }
     let res = store.put_stream(&hash, mime, body.into_data_stream()).await?;
+    store.record_upload(&res.hash, user.0.id).await?;
     let status = if res.created { StatusCode::CREATED } else { StatusCode::OK };
     Ok((status, Json(res)))
 }
 
+/// Project-level like the rest: a blob is served to members of a project
+/// whose versions use it (see `access::unusable_blobs`).
 #[get("/api/blobs/{hash}")]
 async fn get_blob(
-    _user: CurrentUser,
+    user: CurrentUser,
+    Component(db): Component<DatabaseConnection>,
     Component(store): Component<BlobStore>,
     Path(hash): Path<String>,
     req_headers: HeaderMap,
 ) -> Result<Response> {
+    if !is_valid_hash(&hash) || !access::unusable_blobs(&db, &user, std::slice::from_ref(&hash)).await?.is_empty() {
+        return Err(not_found("blob não encontrado"));
+    }
     let blob = store.get(&hash).await?.ok_or_else(|| not_found("blob não encontrado"))?;
     let etag = format!("\"{}\"", blob.hash);
     let cache = HeaderValue::from_static("private, max-age=31536000, immutable");

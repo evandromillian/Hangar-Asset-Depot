@@ -37,7 +37,6 @@ async fn load_tree<C: ConnectionTrait>(db: &C, version_id: Uuid) -> Result<Vec<F
 async fn commit_version(
     user: CurrentUser,
     Component(db): Component<DatabaseConnection>,
-    Component(store): Component<BlobStore>,
     Component(queue): Component<JobQueue>,
     Path(asset_id): Path<Uuid>,
     Json(req): Json<CommitVersionRequest>,
@@ -59,9 +58,11 @@ async fn commit_version(
         return Err(bad_request("mensagem muito longa"));
     }
 
-    // Every referenced blob must exist (uploaded through PUT /api/blobs/{hash}).
+    // Every referenced blob must exist and be readable by the author (a file of
+    // their projects, or uploaded by them through PUT /api/blobs/{hash}): a hash
+    // alone doesn't pull another project's file into this one.
     let hashes: Vec<String> = upserts.values().map(|f| f.hash.clone()).collect();
-    let missing = store.missing(&hashes).await?;
+    let missing = access::unusable_blobs(&db, &user, &hashes).await?;
     if !missing.is_empty() {
         return Err(bad_request(format!("blobs ainda não enviados: {}", missing.join(", "))));
     }

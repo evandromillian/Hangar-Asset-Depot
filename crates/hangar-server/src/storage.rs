@@ -10,7 +10,7 @@ use bytes::Bytes;
 use futures::{Stream, StreamExt};
 use hangar_core::{BlobUploaded, is_valid_hash};
 use opendal::Operator;
-use sea_orm::{ColumnTrait, ConnectionTrait, DatabaseConnection, DbBackend, EntityTrait, QueryFilter, Statement};
+use sea_orm::{ConnectionTrait, DatabaseConnection, DbBackend, EntityTrait, Statement};
 use std::path::{Path, PathBuf};
 use summer_web::axum::http::StatusCode;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -55,30 +55,10 @@ impl BlobStore {
         blobs::Entity::find_by_id(hash.to_string()).one(&self.db).await.ctx("load blob")
     }
 
-    /// Which of `hashes` the server does not have yet.
-    pub async fn missing(&self, hashes: &[String]) -> Result<Vec<String>> {
-        for h in hashes {
-            if !is_valid_hash(h) {
-                return Err(bad_request(format!("hash inválido: {h}")));
-            }
-        }
-        let mut uniq: Vec<String> = hashes.to_vec();
-        uniq.sort();
-        uniq.dedup();
-        let mut present = std::collections::HashSet::new();
-        for chunk in uniq.chunks(1000) {
-            let rows = blobs::Entity::find()
-                .filter(blobs::Column::Hash.is_in(chunk.iter().cloned()))
-                .all(&self.db)
-                .await
-                .ctx("query blobs")?;
-            present.extend(rows.into_iter().map(|r| r.hash));
-        }
-        Ok(uniq.into_iter().filter(|h| !present.contains(h)).collect())
-    }
-
     /// Streams an upload to a temp file while hashing it, verifies the hash
-    /// against `expected`, then moves it into the object store.
+    /// against `expected`, then moves it into the object store. A blob the
+    /// store already has is still read and verified (the upload proves the
+    /// sender has the file, see `access::unusable_blobs`) but not written again.
     pub async fn put_stream<S, E>(&self, expected: &str, mime: Option<String>, mut body: S) -> Result<BlobUploaded>
     where
         S: Stream<Item = std::result::Result<Bytes, E>> + Unpin,
@@ -87,15 +67,14 @@ impl BlobStore {
         if !is_valid_hash(expected) {
             return Err(bad_request("hash inválido"));
         }
-        if let Some(b) = self.get(expected).await? {
-            // Drain nothing: the client should have asked /missing first.
-            return Ok(BlobUploaded { hash: b.hash, size: b.size, created: false });
-        }
+        let exists = self.get(expected).await?.is_some();
 
-        tokio::fs::create_dir_all(&self.tmp).await.ctx("create temp dir")?;
-        let tmp = tempfile::NamedTempFile::new_in(&self.tmp).ctx("create temp file")?;
-        let (std_file, tmp_path) = tmp.into_parts();
-        let mut file = tokio::fs::File::from_std(std_file);
+        let mut tmp = None;
+        if !exists {
+            tokio::fs::create_dir_all(&self.tmp).await.ctx("create temp dir")?;
+            let (std_file, tmp_path) = tempfile::NamedTempFile::new_in(&self.tmp).ctx("create temp file")?.into_parts();
+            tmp = Some((tokio::fs::File::from_std(std_file), tmp_path));
+        }
         let mut hasher = blake3::Hasher::new();
         let mut size: u64 = 0;
         while let Some(chunk) = body.next().await {
@@ -103,17 +82,34 @@ impl BlobStore {
             hasher.update(&chunk);
             size += chunk.len() as u64;
             self.check_upload_size(size)?;
-            file.write_all(&chunk).await.ctx("write temp file")?;
+            if let Some((file, _)) = &mut tmp {
+                file.write_all(&chunk).await.ctx("write temp file")?;
+            }
         }
-        file.flush().await.ctx("flush temp file")?;
-        drop(file);
 
         let actual = hasher.finalize().to_hex().to_string();
         if actual != expected {
             return Err(bad_request(format!("hash não confere: esperado {expected}, recebido {actual}")));
         }
-        self.store_file(&actual, &tmp_path, size, mime).await?;
-        Ok(BlobUploaded { hash: actual, size: size as i64, created: true })
+        if let Some((mut file, tmp_path)) = tmp {
+            file.flush().await.ctx("flush temp file")?;
+            drop(file);
+            self.store_file(&actual, &tmp_path, size, mime).await?;
+        }
+        Ok(BlobUploaded { hash: actual, size: size as i64, created: !exists })
+    }
+
+    /// Records that `user_id` sent the bytes of `hash`.
+    pub async fn record_upload(&self, hash: &str, user_id: uuid::Uuid) -> Result<()> {
+        self.db
+            .execute_raw(Statement::from_sql_and_values(
+                DbBackend::Postgres,
+                "INSERT INTO blob_uploads(blob_hash, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+                [hash.into(), user_id.into()],
+            ))
+            .await
+            .ctx("record upload")?;
+        Ok(())
     }
 
     /// Stores an in-memory buffer (pipeline artifacts). Returns its hash.

@@ -43,7 +43,8 @@ Versioning follows the idea of a git commit, but per **asset** and with large bi
 * **Blob** — immutable content identified by the file's BLAKE3 hash. Stored exactly once at
   `blobs/ab/cd/<hash>` in OpenDAL. Two versions sharing the same 200 MB texture take up
   200 MB, not 400.
-* **Version** — immutable snapshot: a `path → blob` tree + `parent_id` + message + author.
+* **Version** — immutable snapshot: a `path → blob` tree + `parent_id` + message + author
+  (`author_id`, the user who committed it; shown in the Versões timeline).
   Numbering (`v1`, `v2`, …) is sequential per asset; `parent_id` forms a DAG, so you can
   "branch" (e.g. v4 fixes the hull starting from v2, skipping v3).
 * **Head** — the version shown by default for the asset. Every new version becomes head
@@ -58,7 +59,10 @@ Versioning follows the idea of a git commit, but per **asset** and with large bi
   folder again).
 * **Deduplicated upload** — the client computes each file's BLAKE3 (in the browser, in
   wasm), asks `POST /api/blobs/missing` which ones are missing and only sends those with
-  `PUT /api/blobs/{hash}` (streaming; the server re-hashes and validates).
+  `PUT /api/blobs/{hash}` (streaming; the server re-hashes and validates). "Missing" means
+  missing *for this user*: content the server only has in projects the user isn't a member
+  of is sent once more (verified, not stored again), so a hash alone never pulls another
+  project's file into a commit. Each upload is recorded in `blob_uploads`.
 * **Diff** — `GET /api/versions/{id}/diff?against=` compares two trees
   (added / removed / modified / unchanged).
 
@@ -240,6 +244,7 @@ users(id, username, display_name, password_hash, is_admin, created_at)
 projects(id, slug, name, description, created_by, created_at)
 project_members(project_id, user_id, role[owner|editor|viewer])
 blobs(hash, size, mime, created_at)
+blob_uploads(blob_hash, user_id, created_at)                -- who sent each blob's bytes
 assets(id, project_id, slug, name, kind, description, tags jsonb, source jsonb,
        head_version_id, created_by, created_at, updated_at)
 asset_versions(id, asset_id, number, parent_id, message, author_id, status, error,
@@ -262,8 +267,11 @@ at boot and tracked in `schema_migrations`.
   registered user becomes admin.
 * Per project: `owner` (manages members, deletes assets), `editor` (creates assets and
   versions), `viewer` (read-only).
-* Blobs are addressed by a 256-bit hash; downloading requires login and the hash acts as a
-  capability (it can't be enumerated). Files by path (`/raw/`) and zips check the project.
+* Blobs are project-level too (`access::unusable_blobs`): `GET /api/blobs/{hash}` serves a
+  blob to members of a project with a version that has it as a file or rendition, to the
+  user who uploaded it, and to admins; others get 404. Exception: the head thumbnail of a
+  reference skeleton (a system setting) is visible to everyone. A commit may only reference
+  blobs its author can read this way. Files by path (`/raw/`) and zips check the project.
 
 ## Editor plugins ("Enviar para Unreal")
 
@@ -400,9 +408,9 @@ in `crates/hangar-core/src/bridge.rs`.
 
 | method | path | body → response |
 |---|---|---|
-| POST | `/api/blobs/missing` | `MissingBlobsRequest` → `MissingBlobsResponse` (hashes the server doesn't have yet) |
-| PUT | `/api/blobs/{hash}` | raw body (streamed, re-hashed, rejected on mismatch) → `BlobUploaded` |
-| GET | `/api/blobs/{hash}` | bytes (immutable cache; the hash acts as a capability) |
+| POST | `/api/blobs/missing` | `MissingBlobsRequest` → `MissingBlobsResponse` (hashes this user must upload: not stored, or not readable by them) |
+| PUT | `/api/blobs/{hash}` | raw body (streamed, re-hashed, rejected on mismatch; recorded in `blob_uploads`) → `BlobUploaded` |
+| GET | `/api/blobs/{hash}` | bytes (immutable cache; project members only, see [Permissions](#permissions)) |
 
 ### Reference skeletons
 

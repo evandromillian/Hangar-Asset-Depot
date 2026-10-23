@@ -6,6 +6,7 @@ const MIGRATIONS: &[(&str, &str)] = &[
     ("0001_init", include_str!("../migrations/0001_init.sql")),
     ("0002_skeletons", include_str!("../migrations/0002_skeletons.sql")),
     ("0003_api_tokens", include_str!("../migrations/0003_api_tokens.sql")),
+    ("0004_blob_uploads", include_str!("../migrations/0004_blob_uploads.sql")),
 ];
 
 pub async fn migrate(db: &DatabaseConnection) -> anyhow::Result<()> {
